@@ -27,7 +27,12 @@ from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images_square
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
-from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
+from vggt.utils.helper import (
+    create_pixel_coordinate_grid,
+    randomly_limit_trues,
+    get_batches_with_overlap,
+    align_extrinsics,
+)
 from vggt.dependency.track_predict import predict_tracks
 from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
 
@@ -44,6 +49,8 @@ def parse_args():
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--use_ba", action="store_true", default=False, help="Use BA for reconstruction")
+    parser.add_argument("--batch_size", type=int, default=100, help="Number of images processed at once")
+    parser.add_argument("--overlap", type=int, default=10, help="Number of overlapping frames between batches")
     ######### BA parameters #########
     parser.add_argument(
         "--max_reproj_error", type=float, default=8.0, help="Maximum reprojection error for reconstruction"
@@ -124,19 +131,48 @@ def demo_fn(args):
         raise ValueError(f"No images found in {image_dir}")
     base_image_path_list = [os.path.basename(path) for path in image_path_list]
 
-    # Load images and original coordinates
-    # Load Image in 1024, while running VGGT with 518
+    # Load images in 1024, while running VGGT with 518
     vggt_fixed_resolution = 518
     img_load_resolution = 1024
 
-    images, original_coords = load_and_preprocess_images_square(image_path_list, img_load_resolution)
-    images = images.to(device)
-    original_coords = original_coords.to(device)
-    print(f"Loaded {len(images)} images from {image_dir}")
+    batches = get_batches_with_overlap(image_path_list, args.batch_size, args.overlap)
 
-    # Run VGGT to estimate camera and depth
-    # Run with 518x518 images
-    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
+    extrinsic_list = []
+    intrinsic_list = []
+    depth_list = []
+    conf_list = []
+    images_list = []
+    coords_list = []
+
+    for batch_idx, batch_paths in enumerate(batches):
+        imgs, coords = load_and_preprocess_images_square(batch_paths, img_load_resolution)
+        images_list.append(imgs)
+        coords_list.append(coords)
+
+        imgs = imgs.to(device)
+        extr_b, intr_b, depth_b, conf_b = run_VGGT(model, imgs, dtype, vggt_fixed_resolution)
+
+        if batch_idx > 0 and args.overlap > 0:
+            ref_extr = np.concatenate(extrinsic_list)[-args.overlap :]
+            extr_b = align_extrinsics(extr_b, ref_extr, extr_b[: args.overlap])
+            extr_b = extr_b[args.overlap :]
+            intr_b = intr_b[args.overlap :]
+            depth_b = depth_b[args.overlap :]
+            conf_b = conf_b[args.overlap :]
+            images_list[-1] = images_list[-1][args.overlap :]
+            coords_list[-1] = coords_list[-1][args.overlap :]
+
+        extrinsic_list.append(extr_b)
+        intrinsic_list.append(intr_b)
+        depth_list.append(depth_b)
+        conf_list.append(conf_b)
+
+    extrinsic = np.concatenate(extrinsic_list, axis=0)
+    intrinsic = np.concatenate(intrinsic_list, axis=0)
+    depth_map = np.concatenate(depth_list, axis=0)
+    depth_conf = np.concatenate(conf_list, axis=0)
+    images = torch.cat(images_list, dim=0).to(device)
+    original_coords = torch.cat(coords_list, dim=0).to(device)
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     if args.use_ba:

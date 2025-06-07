@@ -7,6 +7,90 @@
 import numpy as np
 
 
+def get_batches_with_overlap(items, batch_size, overlap):
+    """Split a list into batches with overlap.
+
+    Args:
+        items (list): list of items to split
+        batch_size (int): number of items per batch
+        overlap (int): number of overlapping items between consecutive batches
+
+    Returns:
+        list[list]: list of batches
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if overlap >= batch_size:
+        raise ValueError("overlap must be smaller than batch_size")
+
+    batches = []
+    start = 0
+    n = len(items)
+    while start < n:
+        end = min(start + batch_size, n)
+        batches.append(items[start:end])
+        if end == n:
+            break
+        start = end - overlap
+    return batches
+
+
+def compute_similarity_transform(src, dst):
+    """Compute similarity transform (scale, rotation, translation) from src to dst."""
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+    assert src.shape == dst.shape and src.shape[1] == 3
+
+    mu_src = src.mean(axis=0)
+    mu_dst = dst.mean(axis=0)
+
+    src_centered = src - mu_src
+    dst_centered = dst - mu_dst
+
+    cov = src_centered.T @ dst_centered / src.shape[0]
+    U, S, Vt = np.linalg.svd(cov)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[2, :] *= -1
+        R = Vt.T @ U.T
+
+    var_src = (src_centered ** 2).sum() / src.shape[0]
+    scale = S.sum() / var_src if var_src > 0 else 1.0
+
+    t = mu_dst - scale * (R @ mu_src)
+    return scale, R, t
+
+
+def extrinsics_to_centers(extrinsics):
+    """Convert extrinsic matrices (3x4, world to cam) to camera centers."""
+    R = extrinsics[:, :3, :3]
+    t = extrinsics[:, :3, 3]
+    return -(R.transpose(0, 2, 1) @ t[..., None]).squeeze(-1)
+
+
+def align_extrinsics(extrinsics_new, extrinsics_ref, extrinsics_new_overlap):
+    """Align new extrinsics to reference frame using overlap."""
+    if len(extrinsics_ref) == 0:
+        return extrinsics_new
+
+    centers_ref = extrinsics_to_centers(extrinsics_ref)
+    centers_new = extrinsics_to_centers(extrinsics_new_overlap)
+
+    scale, R_align, t_align = compute_similarity_transform(centers_new, centers_ref)
+
+    aligned = []
+    for extr in extrinsics_new:
+        R = extr[:3, :3]
+        t = extr[:3, 3]
+        center = -R.T @ t
+        center = scale * (R_align @ center) + t_align
+        R_new = R_align @ R
+        t_new = -R_new @ center
+        extr_aligned = np.concatenate([R_new, t_new[:, None]], axis=1)
+        aligned.append(extr_aligned)
+
+    return np.stack(aligned, axis=0)
+
 def randomly_limit_trues(mask: np.ndarray, max_trues: int) -> np.ndarray:
     """
     If mask has more than max_trues True values,
