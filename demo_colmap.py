@@ -32,14 +32,23 @@ from vggt.dependency.track_predict import predict_tracks
 from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
 
 
-def log_vram(prefix: str):
-    """Log current CUDA memory usage with a prefix."""
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / (1024 ** 2)
-        reserved = torch.cuda.memory_reserved() / (1024 ** 2)
-        print(f"[{prefix}] VRAM allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
-    else:
+def log_vram(prefix: str, show_summary: bool = False) -> None:
+    """Print VRAM stats with an optional allocator summary."""
+    if not torch.cuda.is_available():
         print(f"[{prefix}] CUDA not available")
+        return
+
+    allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+    reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+    peak_alloc = torch.cuda.max_memory_allocated() / (1024 ** 2)
+    peak_reserved = torch.cuda.max_memory_reserved() / (1024 ** 2)
+    print(
+        f"[{prefix}] VRAM allocated: {allocated:.2f} MB (peak {peak_alloc:.2f} MB), "
+        f"reserved: {reserved:.2f} MB (peak {peak_reserved:.2f} MB)"
+    )
+    if show_summary:
+        print(torch.cuda.memory_summary(abbreviated=True))
+    torch.cuda.reset_peak_memory_stats()
 
 
 # TODO: add support for masks
@@ -82,16 +91,20 @@ def run_VGGT(model, images, dtype, resolution=518):
     images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
 
     with torch.no_grad():
+        torch.cuda.reset_peak_memory_stats()
         with torch.cuda.amp.autocast(dtype=dtype):
             images = images[None]  # add batch dimension
             aggregated_tokens_list, ps_idx = model.aggregator(images)
+        log_vram("After aggregator")
 
         # Predict Cameras
         pose_enc = model.camera_head(aggregated_tokens_list)[-1]
+        log_vram("After camera head")
         # Extrinsic and intrinsic matrices, following OpenCV convention (camera from world)
         extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
         # Predict Depth Maps
         depth_map, depth_conf = model.depth_head(aggregated_tokens_list, images, ps_idx)
+        log_vram("After depth head")
 
     extrinsic = extrinsic.squeeze(0).cpu().numpy()
     intrinsic = intrinsic.squeeze(0).cpu().numpy()
@@ -151,6 +164,7 @@ def demo_fn(args):
     extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
     log_vram("After VGGT")
+    log_vram("After unprojection")
 
     # Free model memory after inference
     del model
@@ -180,6 +194,8 @@ def demo_fn(args):
                 keypoint_extractor="aliked+sp",
                 fine_tracking=args.fine_tracking,
             )
+
+            log_vram("After tracking")
 
             torch.cuda.empty_cache()
 

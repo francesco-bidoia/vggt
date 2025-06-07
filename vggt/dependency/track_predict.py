@@ -9,14 +9,23 @@ import numpy as np
 from .vggsfm_utils import *
 
 
-def log_vram(prefix: str):
-    """Log current CUDA memory usage with a prefix."""
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated() / (1024 ** 2)
-        reserved = torch.cuda.memory_reserved() / (1024 ** 2)
-        print(f"[{prefix}] VRAM allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
-    else:
+def log_vram(prefix: str, show_summary: bool = False) -> None:
+    """Print VRAM stats with an optional allocator summary."""
+    if not torch.cuda.is_available():
         print(f"[{prefix}] CUDA not available")
+        return
+
+    allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+    reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+    peak_alloc = torch.cuda.max_memory_allocated() / (1024 ** 2)
+    peak_reserved = torch.cuda.max_memory_reserved() / (1024 ** 2)
+    print(
+        f"[{prefix}] VRAM allocated: {allocated:.2f} MB (peak {peak_alloc:.2f} MB), "
+        f"reserved: {reserved:.2f} MB (peak {peak_reserved:.2f} MB)"
+    )
+    if show_summary:
+        print(torch.cuda.memory_summary(abbreviated=True))
+    torch.cuda.reset_peak_memory_stats()
 
 
 def predict_tracks(
@@ -68,6 +77,7 @@ def predict_tracks(
 
     # Find query frames
     query_frame_indexes = generate_rank_by_dino(images, query_frame_num=query_frame_num, device=device)
+    log_vram("Ranked frames")
 
     # Add the first image to the front if not already present
     if 0 in query_frame_indexes:
@@ -78,6 +88,7 @@ def predict_tracks(
     keypoint_extractors = initialize_feature_extractors(
         max_query_pts, extractor_method=keypoint_extractor, device=device
     )
+    log_vram("Keypoint extractors")
 
     pred_tracks = []
     pred_vis_scores = []
@@ -105,6 +116,7 @@ def predict_tracks(
             fine_tracking,
             device,
         )
+        log_vram(f"Query {query_index} done")
 
         pred_tracks.append(pred_track)
         pred_vis_scores.append(pred_vis)
@@ -131,6 +143,7 @@ def predict_tracks(
             non_vis_thresh=0.1,
             device=device,
         )
+        log_vram("Augment non visible")
 
     pred_tracks = np.concatenate(pred_tracks, axis=1)
     pred_vis_scores = np.concatenate(pred_vis_scores, axis=1)
@@ -184,6 +197,7 @@ def _forward_on_query(
         pred_color: Point colors for the tracks (0, 255)
     """
     frame_num, _, height, width = images.shape
+    log_vram(f"Query {query_index} start")
 
     query_image = images[query_index]
     query_points = extract_keypoints(query_image, keypoint_extractors, round_keypoints=False)
@@ -237,6 +251,8 @@ def _forward_on_query(
     pred_track, pred_vis, _ = predict_tracks_in_chunks(
         tracker, images_feed, query_points, fmaps_feed, fine_tracking=fine_tracking
     )
+
+    log_vram(f"Query {query_index} tracks")
 
     pred_track, pred_vis = switch_tensor_order([pred_track, pred_vis], reorder_index, dim=1)
 
