@@ -1,0 +1,37 @@
+services:
+  vggt:
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+    build: .
+    image: vggt:cuda-12.4-1
+    network_mode: "host"
+    environment:
+      - DISPLAY=:0
+      - MESA_GL_VERSION_OVERRIDE=4.5 # Needed for running viewers
+    volumes:
+      # This volume is needed for WSL
+      - type: bind
+        source: /mnt/wslg/.X11-unix
+        target: /tmp/.X11-unix
+      ##########################
+      # - type: bind
+      #   source: /tmp/.X11-unix
+      #   target: /tmp/.X11-unix
+      # This is needed to import your own datasets
+      - type: bind
+        source: ./
+        target: /vggt
+      - type: bind
+        source: ../datasets_gs
+        target: /vggt/datasets_gs
+      - type: bind
+        source: ../torch_cache
+        target: /root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
