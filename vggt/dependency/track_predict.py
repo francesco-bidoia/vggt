@@ -9,6 +9,16 @@ import numpy as np
 from .vggsfm_utils import *
 
 
+def log_vram(prefix: str):
+    """Log current CUDA memory usage with a prefix."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+        print(f"[{prefix}] VRAM allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
+    else:
+        print(f"[{prefix}] CUDA not available")
+
+
 def predict_tracks(
     images,
     conf=None,
@@ -54,6 +64,7 @@ def predict_tracks(
     device = images.device
     dtype = images.dtype
     tracker = build_vggsfm_tracker().to(device, dtype)
+    log_vram("Tracker built")
 
     # Find query frames
     query_frame_indexes = generate_rank_by_dino(images, query_frame_num=query_frame_num, device=device)
@@ -75,6 +86,7 @@ def predict_tracks(
     pred_colors = []
 
     fmaps_for_tracker = tracker.process_images_to_fmaps(images)
+    log_vram("Tracker fmaps")
 
     if fine_tracking:
         print("For faster inference, consider disabling fine_tracking")
@@ -128,6 +140,11 @@ def predict_tracks(
 
     # from vggt.utils.visual_track import visualize_tracks_on_images
     # visualize_tracks_on_images(images[None], torch.from_numpy(pred_tracks[None]), torch.from_numpy(pred_vis_scores[None])>0.2, out_dir="track_visuals")
+
+    # Release tracker memory to reduce VRAM footprint
+    del tracker
+    torch.cuda.empty_cache()
+    log_vram("Tracker released")
 
     return pred_tracks, pred_vis_scores, pred_confs, pred_points_3d, pred_colors
 

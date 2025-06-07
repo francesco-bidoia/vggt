@@ -32,6 +32,16 @@ from vggt.dependency.track_predict import predict_tracks
 from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
 
 
+def log_vram(prefix: str):
+    """Log current CUDA memory usage with a prefix."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+        print(f"[{prefix}] VRAM allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
+    else:
+        print(f"[{prefix}] CUDA not available")
+
+
 # TODO: add support for masks
 # TODO: add iterative BA
 # TODO: add support for radial distortion, which needs extra_params
@@ -116,6 +126,7 @@ def demo_fn(args):
     model.eval()
     model = model.to(device)
     print(f"Model loaded")
+    log_vram("Model")
 
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
@@ -133,11 +144,18 @@ def demo_fn(args):
     images = images.to(device)
     original_coords = original_coords.to(device)
     print(f"Loaded {len(images)} images from {image_dir}")
+    log_vram("Images")
 
     # Run VGGT to estimate camera and depth
     # Run with 518x518 images
     extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+    log_vram("After VGGT")
+
+    # Free model memory after inference
+    del model
+    torch.cuda.empty_cache()
+    log_vram("After deleting model")
 
     if args.use_ba:
         image_size = np.array(images.shape[-2:])
