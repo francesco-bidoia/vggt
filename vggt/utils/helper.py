@@ -91,6 +91,49 @@ def align_extrinsics(extrinsics_new, extrinsics_ref, extrinsics_new_overlap):
 
     return np.stack(aligned, axis=0)
 
+
+def merge_track_batches(track_batches, num_frames):
+    """Merge track predictions from multiple batches."""
+
+    total_tracks = sum(batch["tracks"].shape[1] for batch in track_batches)
+    if total_tracks == 0:
+        return (
+            np.zeros((num_frames, 0, 2), dtype=np.float32),
+            np.zeros((num_frames, 0), dtype=np.float32),
+            None,
+            None,
+            None,
+        )
+
+    tracks_all = np.zeros((num_frames, total_tracks, 2), dtype=track_batches[0]["tracks"].dtype)
+    vis_all = np.zeros((num_frames, total_tracks), dtype=track_batches[0]["vis"].dtype)
+
+    conf_list = []
+    points_list = []
+    color_list = []
+
+    offset = 0
+    for batch in track_batches:
+        idx = np.asarray(batch["indices"], dtype=int)
+        t = batch["tracks"]
+        v = batch["vis"]
+        n = t.shape[1]
+        tracks_all[idx, offset : offset + n] = t
+        vis_all[idx, offset : offset + n] = v
+        if batch.get("confs") is not None:
+            conf_list.append(batch["confs"])
+        if batch.get("points3d") is not None:
+            points_list.append(batch["points3d"])
+        if batch.get("colors") is not None:
+            color_list.append(batch["colors"])
+        offset += n
+
+    confs = np.concatenate(conf_list, axis=0) if conf_list else None
+    points3d = np.concatenate(points_list, axis=0) if points_list else None
+    colors = np.concatenate(color_list, axis=0) if color_list else None
+
+    return tracks_all, vis_all, confs, points3d, colors
+
 def randomly_limit_trues(mask: np.ndarray, max_trues: int) -> np.ndarray:
     """
     If mask has more than max_trues True values,

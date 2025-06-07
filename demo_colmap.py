@@ -32,6 +32,7 @@ from vggt.utils.helper import (
     randomly_limit_trues,
     get_batches_with_overlap,
     align_extrinsics,
+    merge_track_batches,
 )
 from vggt.dependency.track_predict import predict_tracks
 from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
@@ -180,26 +181,53 @@ def demo_fn(args):
         scale = img_load_resolution / vggt_fixed_resolution
         shared_camera = args.shared_camera
 
+        track_batches = []
+        frame_batches = get_batches_with_overlap(list(range(len(images))), args.batch_size, args.overlap)
+
         with torch.cuda.amp.autocast(dtype=dtype):
-            # Predicting Tracks
-            # Using VGGSfM tracker instead of VGGT tracker for efficiency
-            # VGGT tracker requires multiple backbone runs to query different frames (this is a problem caused by the training process)
-            # Will be fixed in VGGT v2
+            for bidx, frame_idx in enumerate(frame_batches):
+                imgs_b = images[frame_idx]
+                conf_b = depth_conf[frame_idx]
+                pts_b = points_3d[frame_idx]
 
-            # You can also change the pred_tracks to tracks from any other methods
-            # e.g., from COLMAP, from CoTracker, or by chaining 2D matches from Lightglue/LoFTR.
-            pred_tracks, pred_vis_scores, pred_confs, points_3d, points_rgb = predict_tracks(
-                images,
-                conf=depth_conf,
-                points_3d=points_3d,
-                masks=None,
-                max_query_pts=args.max_query_pts,
-                query_frame_num=args.query_frame_num,
-                keypoint_extractor="aliked+sp",
-                fine_tracking=args.fine_tracking,
-            )
+                t_b, v_b, c_b, p3d_b, color_b = predict_tracks(
+                    imgs_b,
+                    conf=conf_b,
+                    points_3d=pts_b,
+                    masks=None,
+                    max_query_pts=args.max_query_pts,
+                    query_frame_num=args.query_frame_num,
+                    keypoint_extractor="aliked+sp",
+                    fine_tracking=args.fine_tracking,
+                )
 
-            torch.cuda.empty_cache()
+                if bidx > 0 and args.overlap > 0:
+                    frame_idx = frame_idx[args.overlap :]
+                    t_b = t_b[args.overlap :]
+                    v_b = v_b[args.overlap :]
+
+                track_batches.append(
+                    {
+                        "indices": frame_idx,
+                        "tracks": t_b,
+                        "vis": v_b,
+                        "confs": c_b,
+                        "points3d": p3d_b,
+                        "colors": color_b,
+                    }
+                )
+
+                torch.cuda.empty_cache()
+
+        (
+            pred_tracks,
+            pred_vis_scores,
+            pred_confs,
+            points_3d_tracks,
+            points_rgb,
+        ) = merge_track_batches(track_batches, len(images))
+
+        points_3d = points_3d_tracks
 
         # rescale the intrinsic matrix from 518 to 1024
         intrinsic[:, :2, :] *= scale
@@ -207,7 +235,7 @@ def demo_fn(args):
 
         # TODO: radial distortion, iterative BA, masks
         reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
-            points_3d,
+            points_3d_tracks,
             extrinsic,
             intrinsic,
             pred_tracks,

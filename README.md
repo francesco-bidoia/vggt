@@ -181,6 +181,7 @@ python demo_colmap.py --scene_dir=/YOUR/SCENE_DIR/ --use_ba
 
 # Incremental processing (process 60 images at a time with 10-frame overlap)
 python demo_colmap.py --scene_dir=/YOUR/SCENE_DIR/ --batch_size 60 --overlap 10
+# When using --use_ba, track predictions are also processed incrementally with the same options
 ```
 
 Please ensure that the images are stored in `/YOUR/SCENE_DIR/images/`. This folder should contain only the images. Check the examples folder for the desired data structure. 
