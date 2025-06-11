@@ -11,6 +11,7 @@ import os
 import copy
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
 
 # Configure CUDA settings
 torch.backends.cudnn.enabled = True
@@ -62,7 +63,7 @@ def parse_args():
     parser.add_argument("--query_frame_num", type=int, default=5, help="Number of frames to query")
     parser.add_argument("--max_query_pts", type=int, default=2048, help="Maximum number of query points")
     parser.add_argument(
-        "--fine_tracking", action="store_true", default=True, help="Use fine tracking (slower but more accurate)"
+        "--fine_tracking", action="store_true", default=False, help="Use fine tracking (slower but more accurate)"
     )
     parser.add_argument(
         "--conf_thres_value", type=float, default=5.0, help="Confidence threshold value for depth filtering (wo BA)"
@@ -145,7 +146,8 @@ def demo_fn(args):
     images_list = []
     coords_list = []
 
-    for batch_idx, batch_paths in enumerate(batches):
+    print(f"Processing images .... {len(batches)} batches")
+    for batch_idx, batch_paths in tqdm(enumerate(batches)):
         imgs, coords = load_and_preprocess_images_square(batch_paths, img_load_resolution)
         images_list.append(imgs)
         coords_list.append(coords)
@@ -182,13 +184,24 @@ def demo_fn(args):
         shared_camera = args.shared_camera
 
         track_batches = []
-        frame_batches = get_batches_with_overlap(list(range(len(images))), args.batch_size, args.overlap)
+        frame_batches = get_batches_with_overlap(list(range(len(images))), args.batch_size*10, args.overlap)
+
+        # unload images from memory
+        images = images.to('cpu')
+        # Unload model
+        del model
+        # remove cahce
+        torch.cuda.empty_cache() 
 
         with torch.cuda.amp.autocast(dtype=dtype):
-            for bidx, frame_idx in enumerate(frame_batches):
+            print(f"Performing tracking ..... {len(batches)} batches")
+            for bidx, frame_idx in tqdm(enumerate(frame_batches)):
                 imgs_b = images[frame_idx]
+                imgs_b = imgs_b.to(device)
                 conf_b = depth_conf[frame_idx]
                 pts_b = points_3d[frame_idx]
+
+                # import pdb; pdb.set_trace()
 
                 t_b, v_b, c_b, p3d_b, color_b = predict_tracks(
                     imgs_b,
@@ -219,6 +232,7 @@ def demo_fn(args):
 
                 torch.cuda.empty_cache()
 
+        # import pdb; pdb.set_trace()
         (
             pred_tracks,
             pred_vis_scores,
@@ -226,7 +240,7 @@ def demo_fn(args):
             points_3d_tracks,
             points_rgb,
         ) = merge_track_batches(track_batches, len(images))
-
+        # import pdb; pdb.set_trace()
         points_3d = points_3d_tracks
 
         # rescale the intrinsic matrix from 518 to 1024
@@ -246,7 +260,7 @@ def demo_fn(args):
             camera_type=args.camera_type,
             points_rgb=points_rgb,
         )
-
+        import pdb; pdb.set_trace()
         if reconstruction is None:
             raise ValueError("No reconstruction can be built with BA")
 
