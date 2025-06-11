@@ -68,6 +68,12 @@ def parse_args():
     parser.add_argument(
         "--conf_thres_value", type=float, default=5.0, help="Confidence threshold value for depth filtering (wo BA)"
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Enable debug visualizations",
+    )
     return parser.parse_args()
 
 
@@ -178,6 +184,38 @@ def demo_fn(args):
     original_coords = torch.cat(coords_list, dim=0).to(device)
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
+    if args.debug:
+        import matplotlib.pyplot as plt
+
+        debug_dir = os.path.join(args.scene_dir, "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+
+        # Visualize first 5 images and depth maps
+        for i in range(min(5, images.shape[0])):
+            img = images[i].cpu().permute(1, 2, 0).numpy()
+            dep = depth_map[i]
+            fig, ax = plt.subplots(1, 2, figsize=(8, 4))
+            ax[0].imshow(np.clip(img, 0, 1))
+            ax[0].set_title(f"Image {i}")
+            ax[0].axis("off")
+            ax[1].imshow(dep, cmap="plasma")
+            ax[1].set_title("Depth")
+            ax[1].axis("off")
+            plt.tight_layout()
+            fig.savefig(os.path.join(debug_dir, f"img_depth_{i}.png"))
+            plt.close(fig)
+
+        # Plot camera centers
+        R = extrinsic[:, :3, :3]
+        t = extrinsic[:, :3, 3]
+        cam_centers = -np.matmul(R.transpose(0, 2, 1), t[..., None]).squeeze(-1)
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(cam_centers[:, 0], cam_centers[:, 1], cam_centers[:, 2])
+        ax.set_title("Camera centers")
+        fig.savefig(os.path.join(debug_dir, "camera_positions.png"))
+        plt.close(fig)
+
     if args.use_ba:
         image_size = np.array(images.shape[-2:])
         scale = img_load_resolution / vggt_fixed_resolution
@@ -213,6 +251,17 @@ def demo_fn(args):
                     keypoint_extractor="aliked+sp",
                     fine_tracking=args.fine_tracking,
                 )
+
+                if args.debug:
+                    from vggt.utils.visual_track import visualize_tracks_on_images
+
+                    debug_dir = os.path.join(args.scene_dir, "debug", f"tracks_batch_{bidx}")
+                    visualize_tracks_on_images(
+                        imgs_b.cpu(),
+                        torch.from_numpy(t_b),
+                        torch.from_numpy(v_b) > args.vis_thresh,
+                        out_dir=debug_dir,
+                    )
 
                 if bidx > 0 and args.overlap > 0:
                     frame_idx = frame_idx[args.overlap :]
