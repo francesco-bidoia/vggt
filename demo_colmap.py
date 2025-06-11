@@ -152,6 +152,13 @@ def demo_fn(args):
     images_list = []
     coords_list = []
 
+    if args.debug:
+        debug_dir = os.path.join(args.scene_dir, "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        os.makedirs(os.path.join(debug_dir, "batches"), exist_ok=True)
+
+    processed_idx = 0
+
     print(f"Processing images .... {len(batches)} batches")
     for batch_idx, batch_paths in tqdm(enumerate(batches)):
         imgs, coords = load_and_preprocess_images_square(batch_paths, img_load_resolution)
@@ -176,6 +183,26 @@ def demo_fn(args):
         depth_list.append(depth_b)
         conf_list.append(conf_b)
 
+        if args.debug:
+            batch_dir = os.path.join(debug_dir, "batches", f"batch_{batch_idx}")
+            base_paths_batch = base_image_path_list[
+                processed_idx : processed_idx + len(extr_b)
+            ]
+            save_debug_sparse(
+                extr_b,
+                intr_b,
+                depth_b,
+                conf_b,
+                images_list[-1],
+                coords_list[-1].numpy(),
+                base_paths_batch,
+                batch_dir,
+                args.conf_thres_value,
+                vggt_fixed_resolution,
+            )
+
+        processed_idx += len(extr_b)
+
     extrinsic = np.concatenate(extrinsic_list, axis=0)
     intrinsic = np.concatenate(intrinsic_list, axis=0)
     depth_map = np.concatenate(depth_list, axis=0)
@@ -190,7 +217,6 @@ def demo_fn(args):
         debug_dir = os.path.join(args.scene_dir, "debug")
         os.makedirs(debug_dir, exist_ok=True)
 
-        # Visualize first 5 images and depth maps
         for i in range(min(5, images.shape[0])):
             img = images[i].cpu().permute(1, 2, 0).numpy()
             dep = depth_map[i]
@@ -205,55 +231,19 @@ def demo_fn(args):
             fig.savefig(os.path.join(debug_dir, f"img_depth_{i}.png"))
             plt.close(fig)
 
-        # Build a sparse COLMAP model using the raw VGGT outputs
-        debug_sparse_dir = os.path.join(debug_dir, "debug_sparse")
-        os.makedirs(debug_sparse_dir, exist_ok=True)
-
-        conf_thres_value = args.conf_thres_value
-        max_points_for_colmap = 100000
-        shared_camera = False
-        camera_type = "PINHOLE"
-
-        image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
-        num_frames, height, width, _ = points_3d.shape
-
-        points_rgb = F.interpolate(
-            images, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
-        )
-        points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
-        points_rgb = points_rgb.transpose(0, 2, 3, 1)
-
-        points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
-
-        conf_mask = depth_conf >= conf_thres_value
-        conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
-
-        pts3d = points_3d[conf_mask]
-        pts_xyf = points_xyf[conf_mask]
-        colors = points_rgb[conf_mask]
-
-        debug_reconstruction = batch_np_matrix_to_pycolmap_wo_track(
-            pts3d,
-            pts_xyf,
-            colors,
+        final_dir = os.path.join(debug_dir, "debug_sparse")
+        save_debug_sparse(
             extrinsic,
             intrinsic,
-            image_size,
-            shared_camera=shared_camera,
-            camera_type=camera_type,
-        )
-
-        debug_reconstruction = rename_colmap_recons_and_rescale_camera(
-            debug_reconstruction,
-            base_image_path_list,
+            depth_map,
+            depth_conf,
+            images.cpu(),
             original_coords.cpu().numpy(),
-            img_size=vggt_fixed_resolution,
-            shift_point2d_to_original_res=True,
-            shared_camera=shared_camera,
+            base_image_path_list,
+            final_dir,
+            args.conf_thres_value,
+            vggt_fixed_resolution,
         )
-
-        debug_reconstruction.write(debug_sparse_dir)
-        trimesh.PointCloud(pts3d, colors=colors).export(os.path.join(debug_sparse_dir, "points.ply"))
 
     if args.use_ba:
         image_size = np.array(images.shape[-2:])
@@ -415,6 +405,66 @@ def demo_fn(args):
     trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(args.scene_dir, "sparse/points.ply"))
 
     return True
+
+
+def save_debug_sparse(
+    extrinsic,
+    intrinsic,
+    depth_map,
+    depth_conf,
+    images,
+    original_coords,
+    image_paths,
+    out_dir,
+    conf_thres_value,
+    img_size,
+):
+    max_points_for_colmap = 100000
+    shared_camera = False
+    camera_type = "PINHOLE"
+
+    points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    image_size = np.array([img_size, img_size])
+    num_frames, height, width, _ = points_3d.shape
+
+    points_rgb = F.interpolate(images, size=(img_size, img_size), mode="bilinear", align_corners=False)
+    points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
+    points_rgb = points_rgb.transpose(0, 2, 3, 1)
+
+    points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
+
+    conf_mask = depth_conf >= conf_thres_value
+    conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+
+    pts3d = points_3d[conf_mask]
+    pts_xyf = points_xyf[conf_mask]
+    colors = points_rgb[conf_mask]
+
+    recon = batch_np_matrix_to_pycolmap_wo_track(
+        pts3d,
+        pts_xyf,
+        colors,
+        extrinsic,
+        intrinsic,
+        image_size,
+        shared_camera=shared_camera,
+        camera_type=camera_type,
+    )
+
+    recon = rename_colmap_recons_and_rescale_camera(
+        recon,
+        image_paths,
+        original_coords,
+        img_size=img_size,
+        shift_point2d_to_original_res=True,
+        shared_camera=shared_camera,
+    )
+
+    recon.write(out_dir)
+    trimesh.PointCloud(pts3d, colors=colors).export(os.path.join(out_dir, "points.ply"))
 
 
 def rename_colmap_recons_and_rescale_camera(
