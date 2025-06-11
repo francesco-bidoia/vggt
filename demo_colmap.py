@@ -205,16 +205,55 @@ def demo_fn(args):
             fig.savefig(os.path.join(debug_dir, f"img_depth_{i}.png"))
             plt.close(fig)
 
-        # Plot camera centers
-        R = extrinsic[:, :3, :3]
-        t = extrinsic[:, :3, 3]
-        cam_centers = -np.matmul(R.transpose(0, 2, 1), t[..., None]).squeeze(-1)
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection="3d")
-        ax.scatter(cam_centers[:, 0], cam_centers[:, 1], cam_centers[:, 2])
-        ax.set_title("Camera centers")
-        fig.savefig(os.path.join(debug_dir, "camera_positions.png"))
-        plt.close(fig)
+        # Build a sparse COLMAP model using the raw VGGT outputs
+        debug_sparse_dir = os.path.join(debug_dir, "debug_sparse")
+        os.makedirs(debug_sparse_dir, exist_ok=True)
+
+        conf_thres_value = args.conf_thres_value
+        max_points_for_colmap = 100000
+        shared_camera = False
+        camera_type = "PINHOLE"
+
+        image_size = np.array([vggt_fixed_resolution, vggt_fixed_resolution])
+        num_frames, height, width, _ = points_3d.shape
+
+        points_rgb = F.interpolate(
+            images, size=(vggt_fixed_resolution, vggt_fixed_resolution), mode="bilinear", align_corners=False
+        )
+        points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
+        points_rgb = points_rgb.transpose(0, 2, 3, 1)
+
+        points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
+
+        conf_mask = depth_conf >= conf_thres_value
+        conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+
+        pts3d = points_3d[conf_mask]
+        pts_xyf = points_xyf[conf_mask]
+        colors = points_rgb[conf_mask]
+
+        debug_reconstruction = batch_np_matrix_to_pycolmap_wo_track(
+            pts3d,
+            pts_xyf,
+            colors,
+            extrinsic,
+            intrinsic,
+            image_size,
+            shared_camera=shared_camera,
+            camera_type=camera_type,
+        )
+
+        debug_reconstruction = rename_colmap_recons_and_rescale_camera(
+            debug_reconstruction,
+            base_image_path_list,
+            original_coords.cpu().numpy(),
+            img_size=vggt_fixed_resolution,
+            shift_point2d_to_original_res=True,
+            shared_camera=shared_camera,
+        )
+
+        debug_reconstruction.write(debug_sparse_dir)
+        trimesh.PointCloud(pts3d, colors=colors).export(os.path.join(debug_sparse_dir, "points.ply"))
 
     if args.use_ba:
         image_size = np.array(images.shape[-2:])
