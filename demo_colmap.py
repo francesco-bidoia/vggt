@@ -12,6 +12,7 @@ import copy
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+from torchvision import transforms as TF
 
 # Configure CUDA settings
 torch.backends.cudnn.enabled = True
@@ -210,6 +211,13 @@ def demo_fn(args):
     images = torch.cat(images_list, dim=0).to(device)
     original_coords = torch.cat(coords_list, dim=0).to(device)
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    # Save the resized images used for BA
+    images_new_dir = os.path.join(args.scene_dir, "images_new")
+    os.makedirs(images_new_dir, exist_ok=True)
+    to_pil = TF.ToPILImage()
+    for img, name in zip(images.cpu(), base_image_path_list):
+        to_pil(img).save(os.path.join(images_new_dir, name))
 
     if args.debug:
         import matplotlib.pyplot as plt
