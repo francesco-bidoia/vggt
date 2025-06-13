@@ -12,18 +12,23 @@ import numpy as np
 
 def load_and_preprocess_images_square(image_path_list, target_size=1024):
     """
-    Load and preprocess images by center padding to square and resizing to target size.
-    Also returns the position information of original pixels after transformation.
+    Load and preprocess images by resizing the largest side to ``target_size``
+    while keeping the aspect ratio.  Coordinates of the original pixels after
+    the resize operation are also returned.
 
     Args:
         image_path_list (list): List of paths to image files
-        target_size (int, optional): Target size for both width and height. Defaults to 518.
+        target_size (int, optional): Target size for the largest dimension.
+            The other dimension is scaled to maintain the aspect ratio.
 
     Returns:
-        tuple: (
-            torch.Tensor: Batched tensor of preprocessed images with shape (N, 3, target_size, target_size),
-            torch.Tensor: Array of shape (N, 5) containing [x1, y1, x2, y2, width, height] for each image
-        )
+        tuple:
+            torch.Tensor: Batched tensor of resized images with shape ``(N, 3, H, W)``.
+            ``H`` and ``W`` vary per image depending on the original aspect
+            ratio.  ``H`` or ``W`` will be equal to ``target_size``.
+            torch.Tensor: Array ``(N, 6)`` containing ``[x1, y1, x2, y2, width, height]``
+            for each image. ``width`` and ``height`` correspond to the original
+            image resolution.
 
     Raises:
         ValueError: If the input list is empty
@@ -33,7 +38,7 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
         raise ValueError("At least 1 image is required")
 
     images = []
-    original_coords = []  # Renamed from position_info to be more descriptive
+    original_coords = []  # [x1, y1, x2, y2, width, height]
     to_tensor = TF.ToTensor()
 
     for image_path in image_path_list:
@@ -51,34 +56,22 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
         # Get original dimensions
         width, height = img.size
 
-        # Make the image square by padding the shorter dimension
+        # Resize keeping aspect ratio so that the longest side equals ``target_size``
         max_dim = max(width, height)
+        scale = target_size / float(max_dim)
+        new_w = int(round(width * scale))
+        new_h = int(round(height * scale))
 
-        # Calculate padding
-        left = (max_dim - width) // 2
-        top = (max_dim - height) // 2
-
-        # Calculate scale factor for resizing
-        scale = target_size / max_dim
-
-        # Calculate final coordinates of original image in target space
-        x1 = left * scale
-        y1 = top * scale
-        x2 = (left + width) * scale
-        y2 = (top + height) * scale
-
-        # Store original image coordinates and scale
+        # Coordinates of the original image after resizing. No padding is
+        # applied, so the top-left is always (0, 0).
+        x1, y1 = 0.0, 0.0
+        x2, y2 = new_w, new_h
         original_coords.append(np.array([x1, y1, x2, y2, width, height]))
 
-        # Create a new black square image and paste original
-        square_img = Image.new("RGB", (max_dim, max_dim), (0, 0, 0))
-        square_img.paste(img, (left, top))
-
-        # Resize to target size
-        square_img = square_img.resize((target_size, target_size), Image.Resampling.BICUBIC)
+        img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
 
         # Convert to tensor
-        img_tensor = to_tensor(square_img)
+        img_tensor = to_tensor(img)
         images.append(img_tensor)
 
     # Stack all images

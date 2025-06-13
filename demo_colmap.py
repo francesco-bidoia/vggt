@@ -83,8 +83,13 @@ def run_VGGT(model, images, dtype, resolution=518):
     assert len(images.shape) == 4
     assert images.shape[1] == 3
 
-    # hard-coded to use 518 for VGGT
-    images = F.interpolate(images, size=(resolution, resolution), mode="bilinear", align_corners=False)
+    # Resize while keeping aspect ratio.  The largest side is ``resolution`` and
+    # both dimensions are rounded to be divisible by 14 for the patch embed.
+    B, C, H, W = images.shape
+    scale = resolution / float(max(H, W))
+    new_h = max(14, int(round((H * scale) / 14)) * 14)
+    new_w = max(14, int(round((W * scale) / 14)) * 14)
+    images = F.interpolate(images, size=(new_h, new_w), mode="bilinear", align_corners=False)
 
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
