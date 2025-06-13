@@ -17,7 +17,7 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
 
     Args:
         image_path_list (list): List of paths to image files
-        target_size (int, optional): Target size for both width and height. Defaults to 518.
+        target_size (int, optional): Target size for both width and height. Defaults to 1024.
 
     Returns:
         tuple: (
