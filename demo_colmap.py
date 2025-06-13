@@ -212,12 +212,19 @@ def demo_fn(args):
     original_coords = torch.cat(coords_list, dim=0).to(device)
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
-    # Save the resized images used for BA
+    # Save the resized images used for BA without the padded border
     images_new_dir = os.path.join(args.scene_dir, "images_new")
     os.makedirs(images_new_dir, exist_ok=True)
     to_pil = TF.ToPILImage()
-    for img, name in zip(images.cpu(), base_image_path_list):
-        to_pil(img).save(os.path.join(images_new_dir, name))
+
+    cropped_coords = []
+    for img, coords, name in zip(images.cpu(), original_coords.cpu(), base_image_path_list):
+        x1, y1, x2, y2, _, _ = coords.round().int().tolist()
+        cropped = img[:, y1:y2, x1:x2]
+        to_pil(cropped).save(os.path.join(images_new_dir, name))
+        cropped_coords.append([x1, y1, x2, y2, x2 - x1, y2 - y1])
+
+    cropped_coords = np.array(cropped_coords)
 
     if args.debug:
         import matplotlib.pyplot as plt
@@ -398,10 +405,11 @@ def demo_fn(args):
     reconstruction = rename_colmap_recons_and_rescale_camera(
         reconstruction,
         base_image_path_list,
-        original_coords.cpu().numpy(),
+        cropped_coords,
         img_size=reconstruction_resolution,
         shift_point2d_to_original_res=True,
         shared_camera=shared_camera,
+        center_pp=False,
     )
 
     print(f"Saving reconstruction to {args.scene_dir}/sparse")
@@ -476,7 +484,13 @@ def save_debug_sparse(
 
 
 def rename_colmap_recons_and_rescale_camera(
-    reconstruction, image_paths, original_coords, img_size, shift_point2d_to_original_res=False, shared_camera=False
+    reconstruction,
+    image_paths,
+    original_coords,
+    img_size,
+    shift_point2d_to_original_res=False,
+    shared_camera=False,
+    center_pp=True,
 ):
     rescale_camera = True
 
@@ -494,8 +508,12 @@ def rename_colmap_recons_and_rescale_camera(
             real_image_size = original_coords[pyimageid - 1, -2:]
             resize_ratio = max(real_image_size) / img_size
             pred_params = pred_params * resize_ratio
-            real_pp = real_image_size / 2
-            pred_params[-2:] = real_pp  # center of the image
+            if center_pp:
+                real_pp = real_image_size / 2
+                pred_params[-2:] = real_pp
+            else:
+                top_left = original_coords[pyimageid - 1, :2]
+                pred_params[-2:] = pred_params[-2:] - top_left * resize_ratio
 
             pycamera.params = pred_params
             pycamera.width = real_image_size[0]
