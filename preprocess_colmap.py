@@ -35,7 +35,10 @@ from vggt.dependency.track_predict import predict_tracks
 
 
 def stage_resize(scene_dir: str, target_res: int) -> List[str]:
-    """Load images from ``tmp`` and save square resized versions to ``tmp2``."""
+    """Load images from ``tmp`` and save square JPEGs to ``tmp2``.
+
+    The original coordinate metadata is stored as ``coords.npy`` in ``scene_dir``.
+    """
 
     src_dir = os.path.join(scene_dir, "tmp")
     dst_dir = os.path.join(scene_dir, "tmp2")
@@ -46,18 +49,21 @@ def stage_resize(scene_dir: str, target_res: int) -> List[str]:
         key=lambda p: int(os.path.splitext(os.path.basename(p))[0]),
     )
 
-    coords = []
+    indices = [int(os.path.splitext(os.path.basename(p))[0]) for p in image_paths]
+    max_idx = max(indices)
+    coords = np.zeros((max_idx + 1, 6), dtype=np.float32)
     names = []
     to_pil = TF.ToPILImage()
 
     for p in tqdm(image_paths, desc="resize"):
         img, coord = load_and_preprocess_images_square([p], target_res)
-        name = os.path.basename(p)
-        to_pil(img[0]).save(os.path.join(dst_dir, name))
-        coords.append(coord.numpy()[0])
+        idx = int(os.path.splitext(os.path.basename(p))[0])
+        name = f"{idx:08d}.jpg"
+        to_pil(img[0]).save(os.path.join(dst_dir, name), format="JPEG")
+        coords[idx] = coord.numpy()[0]
         names.append(name)
 
-    np.save(os.path.join(dst_dir, "coords.npy"), np.array(coords))
+    np.save(os.path.join(scene_dir, "coords.npy"), coords)
     return names
 
 
@@ -85,7 +91,7 @@ def stage_vggt(
     """Run VGGT on each batch and save outputs under ``batches/batch_*``."""
 
     preprocess_dir = os.path.join(scene_dir, "tmp2")
-    coords = np.load(os.path.join(preprocess_dir, "coords.npy"))
+    coords = np.load(os.path.join(scene_dir, "coords.npy"))
     to_tensor = TF.ToTensor()
 
     model = VGGT()
@@ -98,7 +104,7 @@ def stage_vggt(
         batch_dir = os.path.join(scene_dir, "batches", f"batch_{start}_{end}")
         os.makedirs(batch_dir, exist_ok=True)
 
-        names = [f"{i:08d}.png" for i in b]
+        names = [f"{i:08d}.jpg" for i in b]
         images = torch.stack(
             [to_tensor(Image.open(os.path.join(preprocess_dir, n))) for n in names]
         ).to(device)
@@ -173,7 +179,7 @@ def stage_tracking(
     """Run tracking and BA for each batch."""
 
     preprocess_dir = os.path.join(scene_dir, "tmp2")
-    coords = np.load(os.path.join(preprocess_dir, "coords.npy"))
+    coords = np.load(os.path.join(scene_dir, "coords.npy"))
     to_tensor = TF.ToTensor()
 
     for b in batches:
@@ -186,7 +192,7 @@ def stage_tracking(
         conf = data["conf"]
         indices = data["indices"]
 
-        names = [f"{i:08d}.png" for i in indices]
+        names = [f"{i:08d}.jpg" for i in indices]
         images = torch.stack(
             [to_tensor(Image.open(os.path.join(preprocess_dir, n))) for n in names]
         ).to(device)
@@ -298,7 +304,7 @@ def main(args: argparse.Namespace) -> None:
     else:
         preprocess_dir = os.path.join(args.scene_dir, "tmp2")
         names = sorted(
-            glob.glob(os.path.join(preprocess_dir, "*.png")),
+            glob.glob(os.path.join(preprocess_dir, "*.jpg")),
             key=lambda p: int(os.path.splitext(os.path.basename(p))[0]),
         )
         names = [os.path.basename(n) for n in names]
