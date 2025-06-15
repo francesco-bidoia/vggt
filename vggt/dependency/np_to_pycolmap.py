@@ -256,6 +256,7 @@ def batch_np_matrix_to_pycolmap_wo_track(
     camera = None
     # frame idx
     for fidx in range(N):
+        image_id = int(image_ids[fidx])
         # set camera
         if camera is None or (not shared_camera):
             pycolmap_intri = _build_pycolmap_intri(fidx, intrinsics, camera_type)
