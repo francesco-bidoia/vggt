@@ -193,7 +193,7 @@ def make_sparse_models_consistent(ref_dir: str, tgt_dir: str, output_dir: str) -
             p = img_tgt.points2D[idx]
             coord = (int(round(p.xy[0])), int(round(p.xy[1])))
             if coord not in ref_coords:
-                if p.point3D_id != 0:
+                if p.point3D_id != 0 and p.point3D_id in recon_tgt.points3D:
                     recon_tgt.delete_observation(image_id, idx)
                 else:
                     img_tgt.points2D.pop(idx)
