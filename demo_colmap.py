@@ -312,6 +312,9 @@ def demo_fn(args):
                 intr_b[:, :2, :] *= scale
                 track_mask = v_b > args.vis_thresh
 
+                debug_dir_b = None
+                if args.debug:
+                    debug_dir_b = os.path.join(args.scene_dir, "debug", f"colmap_batch_{bidx}")
                 reconstruction_b, _ = batch_np_matrix_to_pycolmap(
                     p3d_b,
                     extrinsic[frame_idx],
@@ -323,6 +326,8 @@ def demo_fn(args):
                     shared_camera=shared_camera,
                     camera_type=args.camera_type,
                     points_rgb=color_b,
+                    images=imgs_b.cpu(),
+                    debug_dir=debug_dir_b,
                 )
                 if reconstruction_b is None:
                     raise ValueError(f"No reconstruction can be built for batch {bidx}")
@@ -349,6 +354,9 @@ def demo_fn(args):
                 torch.cuda.empty_cache()
 
         # TODO: radial distortion, iterative BA, masks
+        debug_dir_full = None
+        if args.debug:
+            debug_dir_full = os.path.join(args.scene_dir, "debug", "colmap_full")
         reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
             points_3d_tracks,
             extrinsic,
@@ -360,6 +368,8 @@ def demo_fn(args):
             shared_camera=shared_camera,
             camera_type=args.camera_type,
             points_rgb=points_rgb,
+            images=images,
+            debug_dir=debug_dir_full,
         )
         if reconstruction is None:
             raise ValueError("No reconstruction can be built with BA")

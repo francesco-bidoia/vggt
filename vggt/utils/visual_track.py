@@ -237,3 +237,153 @@ def visualize_tracks_on_images(
         print(f"[INFO] Saved color-by-XY track visualization grid -> {out_path}")
 
     print(f"[INFO] Saved {S} individual frames to {out_dir}/frame_*.png")
+
+
+def visualize_tracks_with_projections(
+    images,
+    tracks,
+    projected_tracks,
+    track_vis_mask=None,
+    out_dir="track_proj_debug",
+    image_format="CHW",
+    normalize_mode="[0,1]",
+    cmap_name="hsv",
+    frames_per_row=4,
+    save_grid=True,
+):
+    """Visualize 2D tracks together with their reprojections.
+
+    Parameters
+    ----------
+    images : torch.Tensor
+        Images tensor ``(S,3,H,W)`` or ``(S,H,W,3)``.
+    tracks : torch.Tensor or np.ndarray
+        Tracked 2D points ``(S,N,2)``.
+    projected_tracks : torch.Tensor or np.ndarray
+        Reprojected 2D points ``(S,N,2)`` to compare against ``tracks``.
+    track_vis_mask : torch.Tensor or np.ndarray, optional
+        Visibility mask ``(S,N)``.
+    out_dir : str
+        Output directory to save visualization images.
+    image_format : str
+        Image format ("CHW" or "HWC").
+    normalize_mode : str
+        Image normalization, same as :func:`visualize_tracks_on_images`.
+    cmap_name : str
+        Colormap name for coloring tracks.
+    frames_per_row : int
+        Number of frames per row when saving the grid.
+    save_grid : bool
+        Whether to save the grid image in addition to individual frames.
+    """
+
+    if isinstance(tracks, np.ndarray):
+        tracks = torch.from_numpy(tracks)
+    if isinstance(projected_tracks, np.ndarray):
+        projected_tracks = torch.from_numpy(projected_tracks)
+    if track_vis_mask is not None and isinstance(track_vis_mask, np.ndarray):
+        track_vis_mask = torch.from_numpy(track_vis_mask)
+
+    if len(tracks.shape) == 4:
+        tracks = tracks.squeeze(0)
+        projected_tracks = projected_tracks.squeeze(0)
+        images = images.squeeze(0)
+        if track_vis_mask is not None:
+            track_vis_mask = track_vis_mask.squeeze(0)
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    S = images.shape[0]
+    _, N, _ = tracks.shape
+
+    images = images.cpu().clone()
+    tracks = tracks.cpu().clone()
+    projected_tracks = projected_tracks.cpu().clone()
+    if track_vis_mask is not None:
+        track_vis_mask = track_vis_mask.cpu().clone()
+
+    if image_format == "CHW":
+        H, W = images.shape[2], images.shape[3]
+    else:
+        H, W = images.shape[1], images.shape[2]
+
+    track_colors_rgb = get_track_colors_by_position(
+        tracks, vis_mask_b=track_vis_mask, image_width=W, image_height=H, cmap_name=cmap_name
+    )
+
+    frame_images = []
+
+    for s in range(S):
+        img = images[s]
+        if image_format == "CHW":
+            img = img.permute(1, 2, 0)
+        img = img.numpy().astype(np.float32)
+        if normalize_mode == "[0,1]":
+            img = np.clip(img, 0, 1) * 255.0
+        elif normalize_mode == "[-1,1]":
+            img = (img + 1.0) * 0.5 * 255.0
+            img = np.clip(img, 0, 255.0)
+
+        img = img.astype(np.uint8)
+        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+        cur_tracks = tracks[s]
+        cur_proj = projected_tracks[s]
+        if track_vis_mask is not None:
+            valid_indices = torch.where(track_vis_mask[s])[0]
+        else:
+            valid_indices = range(N)
+
+        cur_tracks_np = cur_tracks.numpy()
+        cur_proj_np = cur_proj.numpy()
+
+        for i in valid_indices:
+            x, y = cur_tracks_np[i]
+            px, py = cur_proj_np[i]
+            pt = (int(round(x)), int(round(y)))
+            proj_pt = (int(round(px)), int(round(py)))
+            R, G, B = track_colors_rgb[i]
+            color_bgr = (int(B), int(G), int(R))
+            cv2.circle(img_bgr, pt, radius=3, color=color_bgr, thickness=-1)
+            cv2.drawMarker(
+                img_bgr,
+                proj_pt,
+                color=color_bgr,
+                markerType=cv2.MARKER_CROSS,
+                markerSize=7,
+                thickness=1,
+            )
+
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        frame_path = os.path.join(out_dir, f"frame_{s:04d}.png")
+        frame_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(frame_path, frame_bgr)
+        frame_images.append(img_rgb)
+
+    if save_grid:
+        num_rows = (S + frames_per_row - 1) // frames_per_row
+        grid_img = None
+        for row in range(num_rows):
+            start_idx = row * frames_per_row
+            end_idx = min(start_idx + frames_per_row, S)
+            row_img = np.concatenate(frame_images[start_idx:end_idx], axis=1)
+            if end_idx - start_idx < frames_per_row:
+                padding_width = (frames_per_row - (end_idx - start_idx)) * W
+                padding = np.zeros((H, padding_width, 3), dtype=np.uint8)
+                row_img = np.concatenate([row_img, padding], axis=1)
+            if grid_img is None:
+                grid_img = row_img
+            else:
+                grid_img = np.concatenate([grid_img, row_img], axis=0)
+
+        out_path = os.path.join(out_dir, "tracks_proj_grid.png")
+        grid_img_bgr = cv2.cvtColor(grid_img, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(out_path, grid_img_bgr)
+        print(f"[INFO] Saved track/projection visualization grid -> {out_path}")
+
+    print(f"[INFO] Saved {S} individual frames to {out_dir}/frame_*.png")
+

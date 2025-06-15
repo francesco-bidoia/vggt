@@ -6,7 +6,9 @@
 
 import numpy as np
 import pycolmap
+import os
 from .projection import project_3D_points_np
+from vggt.utils.visual_track import visualize_tracks_with_projections
 
 
 def batch_np_matrix_to_pycolmap(
@@ -23,6 +25,8 @@ def batch_np_matrix_to_pycolmap(
     extra_params=None,
     min_inlier_per_frame=64,
     points_rgb=None,
+    images=None,
+    debug_dir=None,
 ):
     """
     Convert Batched NumPy Arrays to PyCOLMAP
@@ -36,6 +40,7 @@ def batch_np_matrix_to_pycolmap(
     NOTE: different from VGGSfM, this function:
     1. Use np instead of torch
     2. Frame index and camera id starts from 1 rather than 0 (to fit the format of PyCOLMAP)
+    3. Optionally saves debugging information if ``debug_dir`` is provided
     """
     # points3d: Px3
     # extrinsics: Nx3x4
@@ -65,6 +70,37 @@ def batch_np_matrix_to_pycolmap(
         masks = reproj_mask
 
     assert masks is not None
+
+    if debug_dir is not None:
+        os.makedirs(debug_dir, exist_ok=True)
+
+        if max_reproj_error is None:
+            projected_points_2d, _ = project_3D_points_np(points3d, extrinsics, intrinsics)
+        np.save(os.path.join(debug_dir, "extrinsics.npy"), extrinsics)
+        np.save(os.path.join(debug_dir, "intrinsics.npy"), intrinsics)
+        np.save(os.path.join(debug_dir, "tracks.npy"), tracks)
+        np.save(os.path.join(debug_dir, "masks.npy"), masks)
+        np.save(os.path.join(debug_dir, "points3d.npy"), points3d)
+        if points_rgb is not None:
+            np.save(os.path.join(debug_dir, "points_rgb.npy"), points_rgb)
+        np.save(os.path.join(debug_dir, "projected_points.npy"), projected_points_2d)
+
+        if images is not None:
+            visualize_tracks_with_projections(
+                images,
+                tracks,
+                projected_points_2d,
+                track_vis_mask=masks,
+                out_dir=os.path.join(debug_dir, "vis"),
+            )
+
+        err = np.linalg.norm(projected_points_2d - tracks, axis=-1)
+        if masks is not None:
+            err = err[masks]
+        stats_path = os.path.join(debug_dir, "stats.txt")
+        with open(stats_path, "w") as f:
+            f.write(f"mean_reproj_error: {err.mean()}\n")
+            f.write(f"max_reproj_error: {err.max()}\n")
 
     if masks.sum(1).min() < min_inlier_per_frame:
         print(f"Not enough inliers per frame, skip BA.")
