@@ -292,6 +292,36 @@ def stage_merge_align(scene_dir: str, batches: List[List[int]]) -> None:
     )
 
 
+def check_sparse_image_ids(sparse_dir: str) -> bool:
+    """Verify image name-ID consistency in a COLMAP sparse model.
+
+    Args:
+        sparse_dir: Directory containing the COLMAP sparse model.
+
+    Returns:
+        ``True`` if all image names encode the same numeric ID as stored in the
+        reconstruction. ``False`` otherwise.
+    """
+
+    reconstruction = pycolmap.Reconstruction(sparse_dir)
+    all_match = True
+
+    for image_id, image in reconstruction.images.items():
+        name = os.path.splitext(os.path.basename(image.name))[0]
+        digits = "".join(c for c in name if c.isdigit())
+        if not digits:
+            print(f"Image {image_id} ({image.name}) contains no digits to parse.")
+            all_match = False
+            continue
+        if int(digits) != image_id:
+            print(
+                f"Mismatch: image id {image_id} has name '{image.name}' (parsed {int(digits)})"
+            )
+            all_match = False
+
+    return all_match
+
+
 def main(args: argparse.Namespace) -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = (
