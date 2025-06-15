@@ -167,7 +167,40 @@ def stage_vggt(
         if not check_sparse_image_ids(sparse_dir):
             raise ValueError(f"Image ID mismatch detected in {sparse_dir}")
 
-    del model
+
+def make_sparse_models_consistent(ref_dir: str, tgt_dir: str, output_dir: str) -> None:
+    """Filter ``tgt_dir`` so that overlapping images share identical 2D points with ``ref_dir``.
+
+    Any observation in ``tgt_dir`` that does not exist in the corresponding image
+    of ``ref_dir`` is removed along with its 3D point if necessary. The filtered
+    reconstruction is written to ``output_dir``.
+    """
+
+    recon_ref = pycolmap.Reconstruction(ref_dir)
+    recon_tgt = pycolmap.Reconstruction(tgt_dir)
+
+    common_ids = set(recon_ref.images.keys()) & set(recon_tgt.images.keys())
+
+    for image_id in common_ids:
+        img_ref = recon_ref.images[image_id]
+        img_tgt = recon_tgt.images[image_id]
+
+        ref_coords = {
+            (int(round(p.xy[0])), int(round(p.xy[1]))) for p in img_ref.points2D
+        }
+
+        for idx in reversed(range(img_tgt.num_points2D())):
+            p = img_tgt.points2D[idx]
+            coord = (int(round(p.xy[0])), int(round(p.xy[1])))
+            if coord not in ref_coords:
+                if p.point3D_id != 0 and p.point3D_id in recon_tgt.points3D:
+                    recon_tgt.delete_observation(image_id, idx)
+                else:
+                    img_tgt.points2D.pop(idx)
+
+    os.makedirs(output_dir, exist_ok=True)
+    recon_tgt.write(output_dir)
+
     torch.cuda.empty_cache()
 
 
@@ -282,12 +315,14 @@ def stage_merge_align(scene_dir: str, batches: List[List[int]]) -> None:
         current = batch_dirs[0]
         for i, nxt in enumerate(batch_dirs[1:], start=1):
             tmp_dir = os.path.join(scene_dir, f"tmp_merge_{i}")
+            filtered_dir = os.path.join(scene_dir, f"tmp_filter_{i}")
+            make_sparse_models_consistent(current, nxt, filtered_dir)
             subprocess.run(
                 [
                     "colmap",
                     "model_merger",
                     f"--input_path1={current}",
-                    f"--input_path2={nxt}",
+                    f"--input_path2={filtered_dir}",
                     f"--output_path={tmp_dir}",
                 ],
                 check=True,
