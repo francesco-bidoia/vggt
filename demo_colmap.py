@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import random
+import subprocess
+import shutil
 import numpy as np
 import glob
 import os
@@ -265,25 +267,18 @@ def demo_fn(args):
         scale = img_load_resolution / vggt_fixed_resolution
         shared_camera = args.shared_camera
 
-        track_batches = []
-        frame_batches = get_batches_with_overlap(list(range(len(images))), args.batch_size*10, args.overlap)
-
-        # unload images from memory
-        images = images.to('cpu')
-        # Unload model
+        batch_frames = get_batches_with_overlap(list(range(len(images))), args.batch_size, args.overlap)
+        images = images.to("cpu")
         del model
-        # remove cahce
-        torch.cuda.empty_cache() 
+        torch.cuda.empty_cache()
 
+        batch_dirs = []
         with torch.cuda.amp.autocast(dtype=dtype):
-            print(f"Performing tracking ..... {len(batches)} batches")
-            for bidx, frame_idx in tqdm(enumerate(frame_batches)):
-                imgs_b = images[frame_idx]
-                imgs_b = imgs_b.to(device)
+            print(f"Performing tracking and BA ..... {len(batch_frames)} batches")
+            for bidx, frame_idx in tqdm(enumerate(batch_frames)):
+                imgs_b = images[frame_idx].to(device)
                 conf_b = depth_conf[frame_idx]
                 pts_b = points_3d[frame_idx]
-
-                # import pdb; pdb.set_trace()
 
                 t_b, v_b, c_b, p3d_b, color_b = predict_tracks(
                     imgs_b,
@@ -307,61 +302,72 @@ def demo_fn(args):
                         out_dir=debug_dir,
                     )
 
-                if bidx > 0 and args.overlap > 0:
-                    frame_idx = frame_idx[args.overlap :]
-                    t_b = t_b[args.overlap :]
-                    v_b = v_b[args.overlap :]
+                intr_b = intrinsic[frame_idx].copy()
+                intr_b[:, :2, :] *= scale
+                track_mask = v_b > args.vis_thresh
 
-                track_batches.append(
-                    {
-                        "indices": frame_idx,
-                        "tracks": t_b,
-                        "vis": v_b,
-                        "confs": c_b,
-                        "points3d": p3d_b,
-                        "colors": color_b,
-                    }
+                reconstruction_b, _ = batch_np_matrix_to_pycolmap(
+                    p3d_b,
+                    extrinsic[frame_idx],
+                    intr_b,
+                    t_b,
+                    image_size,
+                    masks=track_mask,
+                    max_reproj_error=args.max_reproj_error,
+                    shared_camera=shared_camera,
+                    camera_type=args.camera_type,
+                    points_rgb=color_b,
                 )
+                if reconstruction_b is None:
+                    raise ValueError(f"No reconstruction can be built for batch {bidx}")
+
+                ba_options = pycolmap.BundleAdjustmentOptions()
+                pycolmap.bundle_adjustment(reconstruction_b, ba_options)
+
+                recon_b = rename_colmap_recons_and_rescale_camera(
+                    reconstruction_b,
+                    [base_image_path_list[i] for i in frame_idx],
+                    cropped_coords[frame_idx],
+                    img_size=img_load_resolution,
+                    shift_point2d_to_original_res=True,
+                    shared_camera=shared_camera,
+                    center_pp=False,
+                )
+
+                batch_dir = os.path.join(args.scene_dir, "sparse_batches", f"batch_{bidx}")
+                os.makedirs(batch_dir, exist_ok=True)
+                recon_b.write(batch_dir)
+                trimesh.PointCloud(p3d_b, colors=color_b).export(os.path.join(batch_dir, "points.ply"))
+                batch_dirs.append(batch_dir)
 
                 torch.cuda.empty_cache()
 
-        # import pdb; pdb.set_trace()
-        (
-            pred_tracks,
-            pred_vis_scores,
-            pred_confs,
-            points_3d_tracks,
-            points_rgb,
-        ) = merge_track_batches(track_batches, len(images))
-        # import pdb; pdb.set_trace()
-        points_3d = points_3d_tracks
+        merged_dir = os.path.join(args.scene_dir, "sparse_merged")
+        os.makedirs(merged_dir, exist_ok=True)
+        if len(batch_dirs) == 1:
+            shutil.copytree(batch_dirs[0], merged_dir, dirs_exist_ok=True)
+        else:
+            current_dir = batch_dirs[0]
+            for nxt in batch_dirs[1:]:
+                tmp_dir = os.path.join(args.scene_dir, f"tmp_merge_{bidx}")
+                subprocess.run([
+                    "colmap",
+                    "model_merger",
+                    f"--input_path1={current_dir}",
+                    f"--input_path2={nxt}",
+                    f"--output_path={tmp_dir}",
+                ], check=True)
+                current_dir = tmp_dir
+            shutil.move(current_dir, merged_dir)
 
-        # rescale the intrinsic matrix from 518 to 1024
-        intrinsic[:, :2, :] *= scale
-        track_mask = pred_vis_scores > args.vis_thresh
-
-        # TODO: radial distortion, iterative BA, masks
-        reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
-            points_3d_tracks,
-            extrinsic,
-            intrinsic,
-            pred_tracks,
-            image_size,
-            masks=track_mask,
-            max_reproj_error=args.max_reproj_error,
-            shared_camera=shared_camera,
-            camera_type=args.camera_type,
-            points_rgb=points_rgb,
-        )
-        import pdb; pdb.set_trace()
-        if reconstruction is None:
-            raise ValueError("No reconstruction can be built with BA")
-
-        # Bundle Adjustment
+        reconstruction = pycolmap.Reconstruction(merged_dir)
         ba_options = pycolmap.BundleAdjustmentOptions()
         pycolmap.bundle_adjustment(reconstruction, ba_options)
-
         reconstruction_resolution = img_load_resolution
+        reconstruction.write(merged_dir)
+        points_3d = np.array([reconstruction.points3D[i].xyz for i in reconstruction.points3D])
+        points_rgb = np.array([reconstruction.points3D[i].color for i in reconstruction.points3D])
+
     else:
         conf_thres_value = args.conf_thres_value
         max_points_for_colmap = 100000  # randomly sample 3D points
@@ -421,7 +427,6 @@ def demo_fn(args):
     trimesh.PointCloud(points_3d, colors=points_rgb).export(os.path.join(args.scene_dir, "sparse/points.ply"))
 
     return True
-
 
 def save_debug_sparse(
     extrinsic,
