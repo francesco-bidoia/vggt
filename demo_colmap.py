@@ -356,7 +356,6 @@ def demo_fn(args):
             camera_type=args.camera_type,
             points_rgb=points_rgb,
         )
-        import pdb; pdb.set_trace()
         if reconstruction is None:
             raise ValueError("No reconstruction can be built with BA")
 
