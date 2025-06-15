@@ -323,6 +323,7 @@ def demo_fn(args):
                     shared_camera=shared_camera,
                     camera_type=args.camera_type,
                     points_rgb=color_b,
+                    image_ids=frame_idx,
                 )
                 if reconstruction_b is None:
                     raise ValueError(f"No reconstruction can be built for batch {bidx}")
@@ -338,6 +339,7 @@ def demo_fn(args):
                     shift_point2d_to_original_res=True,
                     shared_camera=shared_camera,
                     center_pp=False,
+                    image_ids=frame_idx,
                 )
 
                 batch_dir = os.path.join(args.scene_dir, "sparse_batches", f"batch_{bidx}")
@@ -360,6 +362,7 @@ def demo_fn(args):
             shared_camera=shared_camera,
             camera_type=args.camera_type,
             points_rgb=points_rgb,
+            image_ids=list(range(len(base_image_path_list))),
         )
         if reconstruction is None:
             raise ValueError("No reconstruction can be built with BA")
@@ -426,6 +429,7 @@ def demo_fn(args):
             image_size,
             shared_camera=shared_camera,
             camera_type=camera_type,
+            image_ids=list(range(len(base_image_path_list))),
         )
 
         reconstruction_resolution = vggt_fixed_resolution
@@ -438,6 +442,7 @@ def demo_fn(args):
         shift_point2d_to_original_res=True,
         shared_camera=shared_camera,
         center_pp=False,
+        image_ids=list(range(len(base_image_path_list))),
     )
 
     print(f"Saving reconstruction to {args.scene_dir}/sparse")
@@ -495,6 +500,7 @@ def save_debug_sparse(
         image_size,
         shared_camera=shared_camera,
         camera_type=camera_type,
+        image_ids=list(range(len(image_paths))),
     )
 
     recon = rename_colmap_recons_and_rescale_camera(
@@ -504,6 +510,7 @@ def save_debug_sparse(
         img_size=img_size,
         shift_point2d_to_original_res=True,
         shared_camera=shared_camera,
+        image_ids=list(range(len(image_paths))),
     )
 
     recon.write(out_dir)
@@ -518,28 +525,36 @@ def rename_colmap_recons_and_rescale_camera(
     shift_point2d_to_original_res=False,
     shared_camera=False,
     center_pp=True,
+    image_ids=None,
 ):
     rescale_camera = True
+
+    if image_ids is None:
+        image_ids = sorted(reconstruction.images.keys())
+    id_to_idx = {int(i): idx for idx, i in enumerate(image_ids)}
 
     for pyimageid in reconstruction.images:
         # Reshaped the padded&resized image to the original size
         # Rename the images to the original names
         pyimage = reconstruction.images[pyimageid]
+        idx = id_to_idx.get(pyimageid)
+        if idx is None:
+            raise ValueError(f"Image id {pyimageid} not found in image_ids")
         pycamera = reconstruction.cameras[pyimage.camera_id]
-        pyimage.name = image_paths[pyimageid - 1]
+        pyimage.name = image_paths[idx]
 
         if rescale_camera:
             # Rescale the camera parameters
             pred_params = copy.deepcopy(pycamera.params)
 
-            real_image_size = original_coords[pyimageid - 1, -2:]
+            real_image_size = original_coords[idx, -2:]
             resize_ratio = max(real_image_size) / img_size
             pred_params = pred_params * resize_ratio
             if center_pp:
                 real_pp = real_image_size / 2
                 pred_params[-2:] = real_pp
             else:
-                top_left = original_coords[pyimageid - 1, :2]
+                top_left = original_coords[idx, :2]
                 pred_params[-2:] = pred_params[-2:] - top_left * resize_ratio
 
             pycamera.params = pred_params
@@ -548,7 +563,7 @@ def rename_colmap_recons_and_rescale_camera(
 
         if shift_point2d_to_original_res:
             # Also shift the point2D to original resolution
-            top_left = original_coords[pyimageid - 1, :2]
+            top_left = original_coords[idx, :2]
 
             for point2D in pyimage.points2D:
                 point2D.xy = (point2D.xy - top_left) * resize_ratio

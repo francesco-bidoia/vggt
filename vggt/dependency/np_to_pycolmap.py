@@ -6,6 +6,7 @@
 
 import numpy as np
 import pycolmap
+import os
 from .projection import project_3D_points_np
 
 
@@ -23,6 +24,7 @@ def batch_np_matrix_to_pycolmap(
     extra_params=None,
     min_inlier_per_frame=64,
     points_rgb=None,
+    image_ids=None,
 ):
     """
     Convert Batched NumPy Arrays to PyCOLMAP
@@ -36,6 +38,8 @@ def batch_np_matrix_to_pycolmap(
     NOTE: different from VGGSfM, this function:
     1. Use np instead of torch
     2. Frame index and camera id starts from 1 rather than 0 (to fit the format of PyCOLMAP)
+    3. ``image_ids`` can be provided to control the IDs assigned to each image
+       in the reconstruction. When set, image names will also use these IDs.
     """
     # points3d: Px3
     # extrinsics: Nx3x4
@@ -46,6 +50,9 @@ def batch_np_matrix_to_pycolmap(
     # where N is the number of frames and P is the number of tracks
 
     N, P, _ = tracks.shape
+    if image_ids is None:
+        image_ids = np.arange(N) + 1
+    assert len(image_ids) == N
     assert len(extrinsics) == N
     assert len(intrinsics) == N
     assert len(points3d) == P
@@ -87,6 +94,7 @@ def batch_np_matrix_to_pycolmap(
     camera = None
     # frame idx
     for fidx in range(N):
+        image_id = int(image_ids[fidx])
         # set camera
         if camera is None or (not shared_camera):
             pycolmap_intri = _build_pycolmap_intri(fidx, intrinsics, camera_type, extra_params)
@@ -104,7 +112,10 @@ def batch_np_matrix_to_pycolmap(
         )  # Rot and Trans
 
         image = pycolmap.Image(
-            id=fidx + 1, name=f"image_{fidx + 1}", camera_id=camera.camera_id, cam_from_world=cam_from_world
+            id=image_id,
+            name=f"image_{image_id}",
+            camera_id=camera.camera_id,
+            cam_from_world=cam_from_world,
         )
 
         points2D_list = []
@@ -125,7 +136,7 @@ def batch_np_matrix_to_pycolmap(
 
                     # add element
                     track = reconstruction.points3D[point3D_id].track
-                    track.add_element(fidx + 1, point2D_idx)
+                    track.add_element(image_id, point2D_idx)
                     point2D_idx += 1
 
         assert point2D_idx == len(points2D_list)
@@ -133,12 +144,18 @@ def batch_np_matrix_to_pycolmap(
         try:
             image.points2D = pycolmap.ListPoint2D(points2D_list)
             image.registered = True
-        except:
-            print(f"frame {fidx + 1} is out of BA")
+        except Exception:
+            print(f"frame {image_id} is out of BA")
             image.registered = False
 
         # add image
         reconstruction.add_image(image)
+
+        name_digits = "".join(c for c in os.path.splitext(image.name)[0] if c.isdigit())
+        if name_digits and int(name_digits) != image_id:
+            raise ValueError(
+                f"Mismatch between image id {image_id} and name '{image.name}'"
+            )
 
     return reconstruction, valid_mask
 
@@ -205,6 +222,7 @@ def batch_np_matrix_to_pycolmap_wo_track(
     image_size,
     shared_camera=False,
     camera_type="SIMPLE_PINHOLE",
+    image_ids=None,
 ):
     """
     Convert Batched NumPy Arrays to PyCOLMAP
@@ -225,6 +243,9 @@ def batch_np_matrix_to_pycolmap_wo_track(
 
     N = len(extrinsics)
     P = len(points3d)
+    if image_ids is None:
+        image_ids = np.arange(N) + 1
+    assert len(image_ids) == N
 
     # Reconstruction object, following the format of PyCOLMAP/COLMAP
     reconstruction = pycolmap.Reconstruction()
@@ -252,7 +273,10 @@ def batch_np_matrix_to_pycolmap_wo_track(
         )  # Rot and Trans
 
         image = pycolmap.Image(
-            id=fidx + 1, name=f"image_{fidx + 1}", camera_id=camera.camera_id, cam_from_world=cam_from_world
+            id=image_id,
+            name=f"image_{image_id}",
+            camera_id=camera.camera_id,
+            cam_from_world=cam_from_world,
         )
 
         points2D_list = []
@@ -270,7 +294,7 @@ def batch_np_matrix_to_pycolmap_wo_track(
 
             # add element
             track = reconstruction.points3D[point3D_id].track
-            track.add_element(fidx + 1, point2D_idx)
+            track.add_element(image_id, point2D_idx)
             point2D_idx += 1
 
         assert point2D_idx == len(points2D_list)
@@ -278,12 +302,18 @@ def batch_np_matrix_to_pycolmap_wo_track(
         try:
             image.points2D = pycolmap.ListPoint2D(points2D_list)
             image.registered = True
-        except:
-            print(f"frame {fidx + 1} does not have any points")
+        except Exception:
+            print(f"frame {image_id} does not have any points")
             image.registered = False
 
         # add image
         reconstruction.add_image(image)
+
+        name_digits = "".join(c for c in os.path.splitext(image.name)[0] if c.isdigit())
+        if name_digits and int(name_digits) != image_id:
+            raise ValueError(
+                f"Mismatch between image id {image_id} and name '{image.name}'"
+            )
 
     return reconstruction
 

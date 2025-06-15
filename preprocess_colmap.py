@@ -139,7 +139,13 @@ def stage_vggt(
         prgb = points_rgb[conf_mask]
 
         reconstruction = batch_np_matrix_to_pycolmap_wo_track(
-            p3d, pxyf, prgb, extr, intr, image_size
+            p3d,
+            pxyf,
+            prgb,
+            extr,
+            intr,
+            image_size,
+            image_ids=b,
         )
 
         reconstruction = rename_colmap_recons_and_rescale_camera(
@@ -150,12 +156,16 @@ def stage_vggt(
             shift_point2d_to_original_res=True,
             shared_camera=False,
             center_pp=False,
+            image_ids=b,
         )
 
         sparse_dir = os.path.join(batch_dir, "sparse_orig")
         os.makedirs(sparse_dir, exist_ok=True)
         reconstruction.write(sparse_dir)
         trimesh.PointCloud(p3d, colors=prgb).export(os.path.join(sparse_dir, "points.ply"))
+
+        if not check_sparse_image_ids(sparse_dir):
+            raise ValueError(f"Image ID mismatch detected in {sparse_dir}")
 
     del model
     torch.cuda.empty_cache()
@@ -226,6 +236,7 @@ def stage_tracking(
             shared_camera=shared_camera,
             camera_type=camera_type,
             points_rgb=color_b,
+            image_ids=indices,
         )
 
         if reconstruction_b is None:
@@ -242,12 +253,16 @@ def stage_tracking(
             shift_point2d_to_original_res=True,
             shared_camera=shared_camera,
             center_pp=False,
+            image_ids=indices,
         )
 
         sparse_dir = os.path.join(batch_dir, "sparse_ba")
         os.makedirs(sparse_dir, exist_ok=True)
         recon_b.write(sparse_dir)
         trimesh.PointCloud(p3d_b, colors=color_b).export(os.path.join(sparse_dir, "points.ply"))
+
+        if not check_sparse_image_ids(sparse_dir):
+            raise ValueError(f"Image ID mismatch detected in {sparse_dir}")
 
 
 def stage_merge_align(scene_dir: str, batches: List[List[int]]) -> None:
@@ -280,6 +295,9 @@ def stage_merge_align(scene_dir: str, batches: List[List[int]]) -> None:
             current = tmp_dir
         shutil.move(current, merged_dir)
 
+    if not check_sparse_image_ids(merged_dir):
+        raise ValueError(f"Image ID mismatch detected in {merged_dir}")
+
     aligned_dir = os.path.join(scene_dir, "sparse_aligned")
     subprocess.run(
         [
@@ -290,6 +308,9 @@ def stage_merge_align(scene_dir: str, batches: List[List[int]]) -> None:
         ],
         check=True,
     )
+
+    if not check_sparse_image_ids(aligned_dir):
+        raise ValueError(f"Image ID mismatch detected in {aligned_dir}")
 
 
 def check_sparse_image_ids(sparse_dir: str) -> bool:
