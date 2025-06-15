@@ -137,9 +137,12 @@ def demo_fn(args):
 
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "images")
-    image_path_list = glob.glob(os.path.join(image_dir, "*"))
+    image_path_list = glob.glob(os.path.join(image_dir, "*.jpeg"))
     if len(image_path_list) == 0:
         raise ValueError(f"No images found in {image_dir}")
+    image_path_list = sorted(
+        image_path_list, key=lambda p: int(os.path.splitext(os.path.basename(p))[0])
+    )
     base_image_path_list = [os.path.basename(path) for path in image_path_list]
 
     # Load images in 1024, while running VGGT with 518
@@ -348,8 +351,8 @@ def demo_fn(args):
             shutil.copytree(batch_dirs[0], merged_dir, dirs_exist_ok=True)
         else:
             current_dir = batch_dirs[0]
-            for nxt in batch_dirs[1:]:
-                tmp_dir = os.path.join(args.scene_dir, f"tmp_merge_{bidx}")
+            for midx, nxt in enumerate(batch_dirs[1:], start=1):
+                tmp_dir = os.path.join(args.scene_dir, f"tmp_merge_{midx}")
                 subprocess.run([
                     "colmap",
                     "model_merger",
