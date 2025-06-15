@@ -134,7 +134,9 @@ def demo_fn(args):
     print(f"Model loaded")
 
     # Get image paths and preprocess them
-    image_dir = os.path.join(args.scene_dir, "images")
+    # Input images are expected to live under a temporary folder named
+    # "tmp" inside the scene directory.
+    image_dir = os.path.join(args.scene_dir, "tmp")
     image_path_list = glob.glob(os.path.join(image_dir, "*"))
     if len(image_path_list) == 0:
         raise ValueError(f"No images found in {image_dir}")
@@ -213,15 +215,16 @@ def demo_fn(args):
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     # Save the resized images used for BA without the padded border
-    images_new_dir = os.path.join(args.scene_dir, "images_new")
-    os.makedirs(images_new_dir, exist_ok=True)
+    # Save the resized images used for BA to a folder named "images".
+    images_dir = os.path.join(args.scene_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
     to_pil = TF.ToPILImage()
 
     cropped_coords = []
     for img, coords, name in zip(images.cpu(), original_coords.cpu(), base_image_path_list):
         x1, y1, x2, y2, _, _ = coords.round().int().tolist()
         cropped = img[:, y1:y2, x1:x2]
-        to_pil(cropped).save(os.path.join(images_new_dir, name))
+        to_pil(cropped).save(os.path.join(images_dir, name))
         cropped_coords.append([x1, y1, x2, y2, x2 - x1, y2 - y1])
 
     cropped_coords = np.array(cropped_coords)
@@ -353,7 +356,6 @@ def demo_fn(args):
             camera_type=args.camera_type,
             points_rgb=points_rgb,
         )
-        import pdb; pdb.set_trace()
         if reconstruction is None:
             raise ValueError("No reconstruction can be built with BA")
 
@@ -552,7 +554,7 @@ Directory Structure
 ------------------
 Input:
     input_folder/
-    └── images/            # Source images for reconstruction
+    └── tmp/               # Source images for reconstruction
 
 Output:
     output_folder/
