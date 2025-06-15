@@ -5,12 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import random
+import subprocess
+import shutil
 import numpy as np
 import glob
 import os
 import copy
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
+from torchvision import transforms as TF
 
 # Configure CUDA settings
 torch.backends.cudnn.enabled = True
@@ -27,7 +31,13 @@ from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images_square
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
-from vggt.utils.helper import create_pixel_coordinate_grid, randomly_limit_trues
+from vggt.utils.helper import (
+    create_pixel_coordinate_grid,
+    randomly_limit_trues,
+    get_batches_with_overlap,
+    align_extrinsics,
+    merge_track_batches,
+)
 from vggt.dependency.track_predict import predict_tracks
 from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np_matrix_to_pycolmap_wo_track
 
@@ -44,6 +54,8 @@ def parse_args():
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--use_ba", action="store_true", default=False, help="Use BA for reconstruction")
+    parser.add_argument("--batch_size", type=int, default=100, help="Number of images processed at once")
+    parser.add_argument("--overlap", type=int, default=10, help="Number of overlapping frames between batches")
     ######### BA parameters #########
     parser.add_argument(
         "--max_reproj_error", type=float, default=8.0, help="Maximum reprojection error for reconstruction"
@@ -54,10 +66,16 @@ def parse_args():
     parser.add_argument("--query_frame_num", type=int, default=5, help="Number of frames to query")
     parser.add_argument("--max_query_pts", type=int, default=2048, help="Maximum number of query points")
     parser.add_argument(
-        "--fine_tracking", action="store_true", default=True, help="Use fine tracking (slower but more accurate)"
+        "--fine_tracking", action="store_true", default=False, help="Use fine tracking (slower but more accurate)"
     )
     parser.add_argument(
         "--conf_thres_value", type=float, default=5.0, help="Confidence threshold value for depth filtering (wo BA)"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Enable debug visualizations",
     )
     return parser.parse_args()
 
@@ -117,61 +135,224 @@ def demo_fn(args):
     model = model.to(device)
     print(f"Model loaded")
 
-    # Get image paths and preprocess them
-    image_dir = os.path.join(args.scene_dir, "images")
+    # Input images are expected to live under a temporary folder named
+    # "tmp" inside the scene directory.
+    image_dir = os.path.join(args.scene_dir, "tmp")
     image_path_list = glob.glob(os.path.join(image_dir, "*"))
+    
     if len(image_path_list) == 0:
         raise ValueError(f"No images found in {image_dir}")
+    image_path_list = sorted(
+        image_path_list, key=lambda p: int(os.path.splitext(os.path.basename(p))[0])
+    )
     base_image_path_list = [os.path.basename(path) for path in image_path_list]
 
-    # Load images and original coordinates
-    # Load Image in 1024, while running VGGT with 518
+    # Load images in 1024, while running VGGT with 518
     vggt_fixed_resolution = 518
     img_load_resolution = 1024
 
-    images, original_coords = load_and_preprocess_images_square(image_path_list, img_load_resolution)
-    images = images.to(device)
-    original_coords = original_coords.to(device)
-    print(f"Loaded {len(images)} images from {image_dir}")
+    batches = get_batches_with_overlap(image_path_list, args.batch_size, args.overlap)
 
-    # Run VGGT to estimate camera and depth
-    # Run with 518x518 images
-    extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, vggt_fixed_resolution)
+    extrinsic_list = []
+    intrinsic_list = []
+    depth_list = []
+    conf_list = []
+    images_list = []
+    coords_list = []
+
+    if args.debug:
+        debug_dir = os.path.join(args.scene_dir, "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        os.makedirs(os.path.join(debug_dir, "batches"), exist_ok=True)
+
+    processed_idx = 0
+
+    print(f"Processing images .... {len(batches)} batches")
+    for batch_idx, batch_paths in tqdm(enumerate(batches)):
+        imgs, coords = load_and_preprocess_images_square(batch_paths, img_load_resolution)
+        images_list.append(imgs)
+        coords_list.append(coords)
+
+        imgs = imgs.to(device)
+        extr_b, intr_b, depth_b, conf_b = run_VGGT(model, imgs, dtype, vggt_fixed_resolution)
+
+        if batch_idx > 0 and args.overlap > 0:
+            ref_extr = np.concatenate(extrinsic_list)[-args.overlap :]
+            extr_b = align_extrinsics(extr_b, ref_extr, extr_b[: args.overlap])
+            extr_b = extr_b[args.overlap :]
+            intr_b = intr_b[args.overlap :]
+            depth_b = depth_b[args.overlap :]
+            conf_b = conf_b[args.overlap :]
+            images_list[-1] = images_list[-1][args.overlap :]
+            coords_list[-1] = coords_list[-1][args.overlap :]
+
+        extrinsic_list.append(extr_b)
+        intrinsic_list.append(intr_b)
+        depth_list.append(depth_b)
+        conf_list.append(conf_b)
+
+        if args.debug:
+            batch_dir = os.path.join(debug_dir, "batches", f"batch_{batch_idx}")
+            base_paths_batch = base_image_path_list[
+                processed_idx : processed_idx + len(extr_b)
+            ]
+            save_debug_sparse(
+                extr_b,
+                intr_b,
+                depth_b,
+                conf_b,
+                images_list[-1],
+                coords_list[-1].numpy(),
+                base_paths_batch,
+                batch_dir,
+                args.conf_thres_value,
+                vggt_fixed_resolution,
+            )
+
+        processed_idx += len(extr_b)
+
+    extrinsic = np.concatenate(extrinsic_list, axis=0)
+    intrinsic = np.concatenate(intrinsic_list, axis=0)
+    depth_map = np.concatenate(depth_list, axis=0)
+    depth_conf = np.concatenate(conf_list, axis=0)
+    images = torch.cat(images_list, dim=0).to(device)
+    original_coords = torch.cat(coords_list, dim=0).to(device)
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    # Save the resized images used for BA without the padded border
+    # Save the resized images used for BA to a folder named "images".
+    images_dir = os.path.join(args.scene_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
+    to_pil = TF.ToPILImage()
+
+    cropped_coords = []
+    for img, coords, name in zip(images.cpu(), original_coords.cpu(), base_image_path_list):
+        x1, y1, x2, y2, _, _ = coords.round().int().tolist()
+        cropped = img[:, y1:y2, x1:x2]
+        to_pil(cropped).save(os.path.join(images_dir, name))
+        cropped_coords.append([x1, y1, x2, y2, x2 - x1, y2 - y1])
+
+    cropped_coords = np.array(cropped_coords)
+
+    if args.debug:
+        import matplotlib.pyplot as plt
+
+        debug_dir = os.path.join(args.scene_dir, "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+
+        for i in range(min(5, images.shape[0])):
+            img = images[i].cpu().permute(1, 2, 0).numpy()
+            dep = depth_map[i]
+            fig, ax = plt.subplots(1, 2, figsize=(8, 4))
+            ax[0].imshow(np.clip(img, 0, 1))
+            ax[0].set_title(f"Image {i}")
+            ax[0].axis("off")
+            ax[1].imshow(dep, cmap="plasma")
+            ax[1].set_title("Depth")
+            ax[1].axis("off")
+            plt.tight_layout()
+            fig.savefig(os.path.join(debug_dir, f"img_depth_{i}.png"))
+            plt.close(fig)
+
+        final_dir = os.path.join(debug_dir, "debug_sparse")
+        save_debug_sparse(
+            extrinsic,
+            intrinsic,
+            depth_map,
+            depth_conf,
+            images.cpu(),
+            original_coords.cpu().numpy(),
+            base_image_path_list,
+            final_dir,
+            args.conf_thres_value,
+            vggt_fixed_resolution,
+        )
 
     if args.use_ba:
         image_size = np.array(images.shape[-2:])
         scale = img_load_resolution / vggt_fixed_resolution
         shared_camera = args.shared_camera
 
+        batch_frames = get_batches_with_overlap(list(range(len(images))), args.batch_size, args.overlap)
+        images = images.to("cpu")
+        del model
+        torch.cuda.empty_cache()
+
+        batch_dirs = []
         with torch.cuda.amp.autocast(dtype=dtype):
-            # Predicting Tracks
-            # Using VGGSfM tracker instead of VGGT tracker for efficiency
-            # VGGT tracker requires multiple backbone runs to query different frames (this is a problem caused by the training process)
-            # Will be fixed in VGGT v2
+            print(f"Performing tracking and BA ..... {len(batch_frames)} batches")
+            for bidx, frame_idx in tqdm(enumerate(batch_frames)):
+                imgs_b = images[frame_idx].to(device)
+                conf_b = depth_conf[frame_idx]
+                pts_b = points_3d[frame_idx]
 
-            # You can also change the pred_tracks to tracks from any other methods
-            # e.g., from COLMAP, from CoTracker, or by chaining 2D matches from Lightglue/LoFTR.
-            pred_tracks, pred_vis_scores, pred_confs, points_3d, points_rgb = predict_tracks(
-                images,
-                conf=depth_conf,
-                points_3d=points_3d,
-                masks=None,
-                max_query_pts=args.max_query_pts,
-                query_frame_num=args.query_frame_num,
-                keypoint_extractor="aliked+sp",
-                fine_tracking=args.fine_tracking,
-            )
+                t_b, v_b, c_b, p3d_b, color_b = predict_tracks(
+                    imgs_b,
+                    conf=conf_b,
+                    points_3d=pts_b,
+                    masks=None,
+                    max_query_pts=args.max_query_pts,
+                    query_frame_num=args.query_frame_num,
+                    keypoint_extractor="aliked+sp",
+                    fine_tracking=args.fine_tracking,
+                )
 
-            torch.cuda.empty_cache()
+                if args.debug:
+                    from vggt.utils.visual_track import visualize_tracks_on_images
 
-        # rescale the intrinsic matrix from 518 to 1024
-        intrinsic[:, :2, :] *= scale
-        track_mask = pred_vis_scores > args.vis_thresh
+                    debug_dir = os.path.join(args.scene_dir, "debug", f"tracks_batch_{bidx}")
+                    visualize_tracks_on_images(
+                        imgs_b.cpu(),
+                        torch.from_numpy(t_b),
+                        torch.from_numpy(v_b) > args.vis_thresh,
+                        out_dir=debug_dir,
+                    )
+
+                intr_b = intrinsic[frame_idx].copy()
+                intr_b[:, :2, :] *= scale
+                track_mask = v_b > args.vis_thresh
+
+                reconstruction_b, _ = batch_np_matrix_to_pycolmap(
+                    p3d_b,
+                    extrinsic[frame_idx],
+                    intr_b,
+                    t_b,
+                    image_size,
+                    masks=track_mask,
+                    max_reproj_error=args.max_reproj_error,
+                    shared_camera=shared_camera,
+                    camera_type=args.camera_type,
+                    points_rgb=color_b,
+                    image_ids=frame_idx,
+                )
+                if reconstruction_b is None:
+                    raise ValueError(f"No reconstruction can be built for batch {bidx}")
+
+                ba_options = pycolmap.BundleAdjustmentOptions()
+                pycolmap.bundle_adjustment(reconstruction_b, ba_options)
+
+                recon_b = rename_colmap_recons_and_rescale_camera(
+                    reconstruction_b,
+                    [base_image_path_list[i] for i in frame_idx],
+                    cropped_coords[frame_idx],
+                    img_size=img_load_resolution,
+                    shift_point2d_to_original_res=True,
+                    shared_camera=shared_camera,
+                    center_pp=False,
+                    image_ids=frame_idx,
+                )
+
+                batch_dir = os.path.join(args.scene_dir, "sparse_batches", f"batch_{bidx}")
+                os.makedirs(batch_dir, exist_ok=True)
+                recon_b.write(batch_dir)
+                trimesh.PointCloud(p3d_b, colors=color_b).export(os.path.join(batch_dir, "points.ply"))
+                batch_dirs.append(batch_dir)
+
+                torch.cuda.empty_cache()
 
         # TODO: radial distortion, iterative BA, masks
         reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
-            points_3d,
+            points_3d_tracks,
             extrinsic,
             intrinsic,
             pred_tracks,
@@ -181,16 +362,37 @@ def demo_fn(args):
             shared_camera=shared_camera,
             camera_type=args.camera_type,
             points_rgb=points_rgb,
+            image_ids=list(range(len(base_image_path_list))),
         )
-
         if reconstruction is None:
             raise ValueError("No reconstruction can be built with BA")
 
-        # Bundle Adjustment
+        merged_dir = os.path.join(args.scene_dir, "sparse_merged")
+        os.makedirs(merged_dir, exist_ok=True)
+        if len(batch_dirs) == 1:
+            shutil.copytree(batch_dirs[0], merged_dir, dirs_exist_ok=True)
+        else:
+            current_dir = batch_dirs[0]
+            for midx, nxt in enumerate(batch_dirs[1:], start=1):
+                tmp_dir = os.path.join(args.scene_dir, f"tmp_merge_{midx}")
+                subprocess.run([
+                    "colmap",
+                    "model_merger",
+                    f"--input_path1={current_dir}",
+                    f"--input_path2={nxt}",
+                    f"--output_path={tmp_dir}",
+                ], check=True)
+                current_dir = tmp_dir
+            shutil.move(current_dir, merged_dir)
+
+        reconstruction = pycolmap.Reconstruction(merged_dir)
         ba_options = pycolmap.BundleAdjustmentOptions()
         pycolmap.bundle_adjustment(reconstruction, ba_options)
-
         reconstruction_resolution = img_load_resolution
+        reconstruction.write(merged_dir)
+        points_3d = np.array([reconstruction.points3D[i].xyz for i in reconstruction.points3D])
+        points_rgb = np.array([reconstruction.points3D[i].color for i in reconstruction.points3D])
+
     else:
         conf_thres_value = args.conf_thres_value
         max_points_for_colmap = 100000  # randomly sample 3D points
@@ -227,6 +429,7 @@ def demo_fn(args):
             image_size,
             shared_camera=shared_camera,
             camera_type=camera_type,
+            image_ids=list(range(len(base_image_path_list))),
         )
 
         reconstruction_resolution = vggt_fixed_resolution
@@ -234,10 +437,12 @@ def demo_fn(args):
     reconstruction = rename_colmap_recons_and_rescale_camera(
         reconstruction,
         base_image_path_list,
-        original_coords.cpu().numpy(),
+        cropped_coords,
         img_size=reconstruction_resolution,
         shift_point2d_to_original_res=True,
         shared_camera=shared_camera,
+        center_pp=False,
+        image_ids=list(range(len(base_image_path_list))),
     )
 
     print(f"Saving reconstruction to {args.scene_dir}/sparse")
@@ -250,28 +455,107 @@ def demo_fn(args):
 
     return True
 
+def save_debug_sparse(
+    extrinsic,
+    intrinsic,
+    depth_map,
+    depth_conf,
+    images,
+    original_coords,
+    image_paths,
+    out_dir,
+    conf_thres_value,
+    img_size,
+):
+    max_points_for_colmap = 100000
+    shared_camera = False
+    camera_type = "PINHOLE"
+
+    points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    image_size = np.array([img_size, img_size])
+    num_frames, height, width, _ = points_3d.shape
+
+    points_rgb = F.interpolate(images, size=(img_size, img_size), mode="bilinear", align_corners=False)
+    points_rgb = (points_rgb.cpu().numpy() * 255).astype(np.uint8)
+    points_rgb = points_rgb.transpose(0, 2, 3, 1)
+
+    points_xyf = create_pixel_coordinate_grid(num_frames, height, width)
+
+    conf_mask = depth_conf >= conf_thres_value
+    conf_mask = randomly_limit_trues(conf_mask, max_points_for_colmap)
+
+    pts3d = points_3d[conf_mask]
+    pts_xyf = points_xyf[conf_mask]
+    colors = points_rgb[conf_mask]
+
+    recon = batch_np_matrix_to_pycolmap_wo_track(
+        pts3d,
+        pts_xyf,
+        colors,
+        extrinsic,
+        intrinsic,
+        image_size,
+        shared_camera=shared_camera,
+        camera_type=camera_type,
+        image_ids=list(range(len(image_paths))),
+    )
+
+    recon = rename_colmap_recons_and_rescale_camera(
+        recon,
+        image_paths,
+        original_coords,
+        img_size=img_size,
+        shift_point2d_to_original_res=True,
+        shared_camera=shared_camera,
+        image_ids=list(range(len(image_paths))),
+    )
+
+    recon.write(out_dir)
+    trimesh.PointCloud(pts3d, colors=colors).export(os.path.join(out_dir, "points.ply"))
+
 
 def rename_colmap_recons_and_rescale_camera(
-    reconstruction, image_paths, original_coords, img_size, shift_point2d_to_original_res=False, shared_camera=False
+    reconstruction,
+    image_paths,
+    original_coords,
+    img_size,
+    shift_point2d_to_original_res=False,
+    shared_camera=False,
+    center_pp=True,
+    image_ids=None,
 ):
     rescale_camera = True
+
+    if image_ids is None:
+        image_ids = sorted(reconstruction.images.keys())
+    id_to_idx = {int(i): idx for idx, i in enumerate(image_ids)}
 
     for pyimageid in reconstruction.images:
         # Reshaped the padded&resized image to the original size
         # Rename the images to the original names
         pyimage = reconstruction.images[pyimageid]
+        idx = id_to_idx.get(pyimageid)
+        if idx is None:
+            raise ValueError(f"Image id {pyimageid} not found in image_ids")
         pycamera = reconstruction.cameras[pyimage.camera_id]
-        pyimage.name = image_paths[pyimageid - 1]
+        pyimage.name = image_paths[idx]
 
         if rescale_camera:
             # Rescale the camera parameters
             pred_params = copy.deepcopy(pycamera.params)
 
-            real_image_size = original_coords[pyimageid - 1, -2:]
+            real_image_size = original_coords[idx, -2:]
             resize_ratio = max(real_image_size) / img_size
             pred_params = pred_params * resize_ratio
-            real_pp = real_image_size / 2
-            pred_params[-2:] = real_pp  # center of the image
+            if center_pp:
+                real_pp = real_image_size / 2
+                pred_params[-2:] = real_pp
+            else:
+                top_left = original_coords[idx, :2]
+                pred_params[-2:] = pred_params[-2:] - top_left * resize_ratio
 
             pycamera.params = pred_params
             pycamera.width = real_image_size[0]
@@ -279,7 +563,7 @@ def rename_colmap_recons_and_rescale_camera(
 
         if shift_point2d_to_original_res:
             # Also shift the point2D to original resolution
-            top_left = original_coords[pyimageid - 1, :2]
+            top_left = original_coords[idx, :2]
 
             for point2D in pyimage.points2D:
                 point2D.xy = (point2D.xy - top_left) * resize_ratio
@@ -310,7 +594,7 @@ Directory Structure
 ------------------
 Input:
     input_folder/
-    └── images/            # Source images for reconstruction
+    └── tmp/               # Source images for reconstruction
 
 Output:
     output_folder/
