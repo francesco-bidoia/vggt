@@ -135,9 +135,11 @@ def demo_fn(args):
     model = model.to(device)
     print(f"Model loaded")
 
-    # Get image paths and preprocess them
-    image_dir = os.path.join(args.scene_dir, "images")
-    image_path_list = glob.glob(os.path.join(image_dir, "*.jpeg"))
+    # Input images are expected to live under a temporary folder named
+    # "tmp" inside the scene directory.
+    image_dir = os.path.join(args.scene_dir, "tmp")
+    image_path_list = glob.glob(os.path.join(image_dir, "*"))
+    
     if len(image_path_list) == 0:
         raise ValueError(f"No images found in {image_dir}")
     image_path_list = sorted(
@@ -218,15 +220,16 @@ def demo_fn(args):
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     # Save the resized images used for BA without the padded border
-    images_new_dir = os.path.join(args.scene_dir, "images_new")
-    os.makedirs(images_new_dir, exist_ok=True)
+    # Save the resized images used for BA to a folder named "images".
+    images_dir = os.path.join(args.scene_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
     to_pil = TF.ToPILImage()
 
     cropped_coords = []
     for img, coords, name in zip(images.cpu(), original_coords.cpu(), base_image_path_list):
         x1, y1, x2, y2, _, _ = coords.round().int().tolist()
         cropped = img[:, y1:y2, x1:x2]
-        to_pil(cropped).save(os.path.join(images_new_dir, name))
+        to_pil(cropped).save(os.path.join(images_dir, name))
         cropped_coords.append([x1, y1, x2, y2, x2 - x1, y2 - y1])
 
     cropped_coords = np.array(cropped_coords)
@@ -344,6 +347,22 @@ def demo_fn(args):
                 batch_dirs.append(batch_dir)
 
                 torch.cuda.empty_cache()
+
+        # TODO: radial distortion, iterative BA, masks
+        reconstruction, valid_track_mask = batch_np_matrix_to_pycolmap(
+            points_3d_tracks,
+            extrinsic,
+            intrinsic,
+            pred_tracks,
+            image_size,
+            masks=track_mask,
+            max_reproj_error=args.max_reproj_error,
+            shared_camera=shared_camera,
+            camera_type=args.camera_type,
+            points_rgb=points_rgb,
+        )
+        if reconstruction is None:
+            raise ValueError("No reconstruction can be built with BA")
 
         merged_dir = os.path.join(args.scene_dir, "sparse_merged")
         os.makedirs(merged_dir, exist_ok=True)
@@ -560,7 +579,7 @@ Directory Structure
 ------------------
 Input:
     input_folder/
-    └── images/            # Source images for reconstruction
+    └── tmp/               # Source images for reconstruction
 
 Output:
     output_folder/
