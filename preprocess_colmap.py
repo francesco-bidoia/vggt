@@ -168,38 +168,55 @@ def stage_vggt(
             raise ValueError(f"Image ID mismatch detected in {sparse_dir}")
 
 
-def make_sparse_models_consistent(ref_dir: str, tgt_dir: str, output_dir: str) -> None:
-    """Filter ``tgt_dir`` so that overlapping images share identical 2D points with ``ref_dir``.
+def make_sparse_models_consistent(
+    dir_a: str, dir_b: str, out_a: str, out_b: str
+) -> None:
+    """Prune inconsistent observations so both models share identical 2D points.
 
-    Any observation in ``tgt_dir`` that does not exist in the corresponding image
-    of ``ref_dir`` is removed along with its 3D point if necessary. The filtered
-    reconstruction is written to ``output_dir``.
+    For every overlapping image, only points that appear in *both* reconstructions
+    are kept. The filtered reconstructions are written to ``out_a`` and ``out_b``.
     """
 
-    recon_ref = pycolmap.Reconstruction(ref_dir)
-    recon_tgt = pycolmap.Reconstruction(tgt_dir)
+    recon_a = pycolmap.Reconstruction(dir_a)
+    recon_b = pycolmap.Reconstruction(dir_b)
 
-    common_ids = set(recon_ref.images.keys()) & set(recon_tgt.images.keys())
+    common_ids = set(recon_a.images.keys()) & set(recon_b.images.keys())
 
     for image_id in common_ids:
-        img_ref = recon_ref.images[image_id]
-        img_tgt = recon_tgt.images[image_id]
+        img_a = recon_a.images[image_id]
+        img_b = recon_b.images[image_id]
 
-        ref_coords = {
-            (int(round(p.xy[0])), int(round(p.xy[1]))) for p in img_ref.points2D
+        coords_a = {
+            (int(round(p.xy[0])), int(round(p.xy[1]))) for p in img_a.points2D
+        }
+        coords_b = {
+            (int(round(p.xy[0])), int(round(p.xy[1]))) for p in img_b.points2D
         }
 
-        for idx in reversed(range(img_tgt.num_points2D())):
-            p = img_tgt.points2D[idx]
-            coord = (int(round(p.xy[0])), int(round(p.xy[1])))
-            if coord not in ref_coords:
-                if p.point3D_id != 0 and p.point3D_id in recon_tgt.points3D:
-                    recon_tgt.delete_observation(image_id, idx)
-                else:
-                    img_tgt.points2D.pop(idx)
+        keep = coords_a & coords_b
 
-    os.makedirs(output_dir, exist_ok=True)
-    recon_tgt.write(output_dir)
+        for idx in reversed(range(img_a.num_points2D())):
+            p = img_a.points2D[idx]
+            coord = (int(round(p.xy[0])), int(round(p.xy[1])))
+            if coord not in keep:
+                if p.point3D_id != 0 and p.point3D_id in recon_a.points3D:
+                    recon_a.delete_observation(image_id, idx)
+                else:
+                    img_a.points2D.pop(idx)
+
+        for idx in reversed(range(img_b.num_points2D())):
+            p = img_b.points2D[idx]
+            coord = (int(round(p.xy[0])), int(round(p.xy[1])))
+            if coord not in keep:
+                if p.point3D_id != 0 and p.point3D_id in recon_b.points3D:
+                    recon_b.delete_observation(image_id, idx)
+                else:
+                    img_b.points2D.pop(idx)
+
+    os.makedirs(out_a, exist_ok=True)
+    os.makedirs(out_b, exist_ok=True)
+    recon_a.write(out_a)
+    recon_b.write(out_b)
 
     torch.cuda.empty_cache()
 
@@ -315,14 +332,15 @@ def stage_merge_align(scene_dir: str, batches: List[List[int]]) -> None:
         current = batch_dirs[0]
         for i, nxt in enumerate(batch_dirs[1:], start=1):
             tmp_dir = os.path.join(scene_dir, f"tmp_merge_{i}")
-            filtered_dir = os.path.join(scene_dir, f"tmp_filter_{i}")
-            make_sparse_models_consistent(current, nxt, filtered_dir)
+            filtered_cur = os.path.join(scene_dir, f"tmp_filter_{i}_a")
+            filtered_nxt = os.path.join(scene_dir, f"tmp_filter_{i}_b")
+            make_sparse_models_consistent(current, nxt, filtered_cur, filtered_nxt)
             subprocess.run(
                 [
                     "colmap",
                     "model_merger",
-                    f"--input_path1={current}",
-                    f"--input_path2={filtered_dir}",
+                    f"--input_path1={filtered_cur}",
+                    f"--input_path2={filtered_nxt}",
                     f"--output_path={tmp_dir}",
                 ],
                 check=True,
