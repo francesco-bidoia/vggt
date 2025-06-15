@@ -193,12 +193,14 @@ def make_sparse_models_consistent(ref_dir: str, tgt_dir: str, output_dir: str) -
             p = img_tgt.points2D[idx]
             coord = (int(round(p.xy[0])), int(round(p.xy[1])))
             if coord not in ref_coords:
-                recon_tgt.delete_observation(image_id, idx)
+                if p.point3D_id != 0:
+                    recon_tgt.delete_observation(image_id, idx)
+                else:
+                    img_tgt.points2D.pop(idx)
 
     os.makedirs(output_dir, exist_ok=True)
     recon_tgt.write(output_dir)
 
-    del model
     torch.cuda.empty_cache()
 
 
